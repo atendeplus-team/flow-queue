@@ -131,11 +131,11 @@ serve(async (req: Request) => {
 
     const now = new Date().toISOString();
 
-    // 3) Marcar ticket como chamado
+    // 3) Marcar ticket como chamado (status: 'Aguardando' - aguardando chegada)
     const updatePayload: Record<string, any> = {
-      status: 'called',
+      status: 'Aguardando',
       called_at: now,
-      in_service: true,
+      in_service: false,
       counter,
     };
     if (doctor_name) updatePayload.doctor_name = doctor_name;
@@ -151,7 +151,13 @@ serve(async (req: Request) => {
       throw upErr;
     }
 
-    return new Response(JSON.stringify({ success: true, next }), {
+    // Retorna o ticket com os campos atualizados
+    const updatedTicket = {
+      ...next,
+      ...updatePayload,
+    };
+
+    return new Response(JSON.stringify({ success: true, next: updatedTicket }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       status: 200,
     });

@@ -602,16 +602,3 @@ const DoctorDisplay = () => {
 };
 
 export default DoctorDisplay;
-text-xl text-slate-500 max-w-md mx-auto'>
-                  Adicione slides em Admin → Configurações
-                </p>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-export default DoctorDisplay;

@@ -18,10 +18,13 @@ export function initializeAudioContext() {
         
         // Se estiver suspenso, retoma
         if (audioContext.state === 'suspended') {
-          audioContext.resume().catch(() => {});
+          audioContext.resume().catch((err) => {
+            console.debug('[AudioContext] Falha ao resumir contexto:', err?.message);
+          });
         }
       } catch (e) {
         // Navegador não suporta Web Audio API
+        console.debug('[AudioContext] Web Audio API não suportada');
       }
     }
     
@@ -38,9 +41,12 @@ export function initializeAudioContext() {
   try {
     const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
     if (audioContext.state === 'suspended') {
-      audioContext.resume().catch(() => {});
+      audioContext.resume().catch((err) => {
+        console.debug('[AudioContext] Falha ao resumir na inicialização:', err?.message);
+      });
     }
   } catch (e) {
-    // Ignorar erros
+    // Ignorar erros de navegadores que não suportam Web Audio
+    console.debug('[AudioContext] Erro na inicialização:', (e as Error)?.message);
   }
 }

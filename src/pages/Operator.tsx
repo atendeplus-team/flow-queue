@@ -26,7 +26,6 @@ import {
   Phone,
   CheckCircle,
   Repeat,
-  Monitor,
   LogOut,
   Loader2,
   Send,
@@ -77,6 +76,8 @@ const Operator = () => {
     useState<string>('');
 
   const [finishing, setFinishing] = useState(false);
+  const [showCancelDialog, setShowCancelDialog] = useState(false);
+  const [cancellationReason, setCancellationReason] = useState('');
   const navigate = useNavigate();
   const { toast } = useToast();
   const {
@@ -90,51 +91,6 @@ const Operator = () => {
   const handleLogout = async () => {
     await supabase.auth.signOut();
     navigate('/auth');
-  };
-
-  const openDisplay = () => {
-    const url = '/display?fs=1';
-    let win = window.open(
-      url,
-      'displayWindow',
-      'fullscreen=yes,toolbar=0,location=0,menubar=0,status=0,resizable=1'
-    );
-    if (!win) win = window.open(url, '_blank');
-    if (!win) {
-      toast({
-        title: 'Bloqueado pelo navegador',
-        description: 'Permita pop-ups para abrir o Display em tela cheia.',
-        variant: 'destructive',
-      });
-      return;
-    }
-    try {
-      win.focus();
-      const el: any = win.document.documentElement;
-      const req =
-        el.requestFullscreen ||
-        el.webkitRequestFullscreen ||
-        el.msRequestFullscreen;
-      if (req) {
-        try {
-          req.call(el);
-        } catch {}
-      }
-      const onLoad = () => {
-        const el2: any = win.document.documentElement;
-        const req2 =
-          el2.requestFullscreen ||
-          el2.webkitRequestFullscreen ||
-          el2.msRequestFullscreen;
-        if (req2) {
-          try {
-            req2.call(el2);
-          } catch {}
-        }
-      };
-      if (win.document.readyState === 'complete') onLoad();
-      else win.addEventListener('load', onLoad, { once: true });
-    } catch {}
   };
 
   useEffect(() => {
@@ -287,74 +243,92 @@ const Operator = () => {
   }, [showFinishDialog]);
 
   const loadWaitingTickets = async () => {
-    const { data, error } = await supabase.functions.invoke('queue-preview', {
-      body: {},
-    });
+    // Adiciona timeout de 10s para evitar travamento
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
 
-    if (error) {
-      toast({
-        title: 'Erro ao carregar senhas',
-        description: error.message,
-        variant: 'destructive',
+    try {
+      const { data, error } = await supabase.functions.invoke('queue-preview', {
+        body: {},
+        signal: controller.signal,
       });
-      return;
-    }
 
-    const items = (data as any)?.items as any[] | undefined;
-    if (items && Array.isArray(items)) {
-      const mapped = items.map((d) => ({
-        id: d.id,
-        display_number: d.display_number,
-        priority: d.priority,
-        queue_id: d.queue_id,
-        created_at: d.created_at,
-        status: 'waiting',
-      }));
-      setTickets(mapped as any);
-      setWaitPage((prev) => {
-        const maxPage = Math.max(
-          0,
-          Math.floor(Math.max(0, (items.length - 1) / PAGE_SIZE))
-        );
-        return Math.min(prev, maxPage);
-      });
+      if (error) {
+        toast({
+          title: 'Erro ao carregar senhas',
+          description: error.message,
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      const items = (data as any)?.items as any[] | undefined;
+      if (items && Array.isArray(items)) {
+        const mapped = items.map((d) => ({
+          id: d.id,
+          display_number: d.display_number,
+          priority: d.priority,
+          queue_id: d.queue_id,
+          created_at: d.created_at,
+          status: 'waiting',
+        }));
+        setTickets(mapped as any);
+        setWaitPage((prev) => {
+          const maxPage = Math.max(
+            0,
+            Math.floor(Math.max(0, (items.length - 1) / PAGE_SIZE))
+          );
+          return Math.min(prev, maxPage);
+        });
+      }
+    } finally {
+      clearTimeout(timeout);
     }
   };
 
   const callNextTicket = async () => {
-    const { data, error } = await supabase.functions.invoke('call-next', {
-      body: { operator_name: operatorName, counter },
-    });
+    // Adiciona timeout de 10s para evitar travamento
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
 
-    if (error) {
-      toast({
-        title: 'Erro ao chamar senha',
-        description: error.message,
-        variant: 'destructive',
+    try {
+      const { data, error } = await supabase.functions.invoke('call-next', {
+        body: { operator_name: operatorName, counter },
+        signal: controller.signal,
       });
-      return;
-    }
 
-    const nextTicket = (data as any)?.next as Ticket | null;
-    if (!nextTicket) {
+      if (error) {
+        toast({
+          title: 'Erro ao chamar senha',
+          description: error.message,
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      const nextTicket = (data as any)?.next as Ticket | null;
+      if (!nextTicket) {
+        toast({
+          title: 'Nenhuma senha disponível',
+          description: 'Não há senhas aguardando no momento.',
+        });
+        return;
+      }
+
+      const newCallCount = callCount + 1;
+      setCallCount(newCallCount);
+      localStorage.setItem('callCount', newCallCount.toString());
+
+      setCurrentTicket(nextTicket);
+      localStorage.setItem('currentTicketId', nextTicket.id);
       toast({
-        title: 'Nenhuma senha disponível',
-        description: 'Não há senhas aguardando no momento.',
+        title: 'Senha chamada',
+        description: `Senha ${nextTicket.display_number} foi chamada!`,
       });
-      return;
+      loadWaitingTickets();
+    } finally {
+      clearTimeout(timeout);
     }
-
-    const newCallCount = callCount + 1;
-    setCallCount(newCallCount);
-    localStorage.setItem('callCount', newCallCount.toString());
-
-    setCurrentTicket(nextTicket);
-    localStorage.setItem('currentTicketId', nextTicket.id);
-    toast({
-      title: 'Senha chamada',
-      description: `Senha ${nextTicket.display_number} foi chamada!`,
-    });
-    loadWaitingTickets();
   };
 
   const repeatCall = async () => {
@@ -386,6 +360,25 @@ const Operator = () => {
   const cancelTicket = async () => {
     if (!currentTicket) return;
 
+    // Validar se o motivo foi informado
+    if (!cancellationReason.trim()) {
+      toast({
+        title: 'Motivo obrigatório',
+        description: 'É necessário informar o motivo do cancelamento.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    if (cancellationReason.length > 200) {
+      toast({
+        title: 'Motivo muito longo',
+        description: 'O motivo deve ter no máximo 200 caracteres.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
     const now = new Date().toISOString();
 
     const { error } = await supabase
@@ -395,6 +388,7 @@ const Operator = () => {
         cancelled_at: now,
         finished_at: now,
         in_service: false,
+        cancellation_reason: cancellationReason.trim(),
       })
       .eq('id', currentTicket.id);
 
@@ -414,12 +408,14 @@ const Operator = () => {
     });
 
     setCurrentTicket(null);
+    setCancellationReason('');
+    setShowCancelDialog(false);
     localStorage.removeItem('currentTicketId');
     loadWaitingTickets();
   };
 
   const finishService = async (): Promise<boolean> => {
-    if (!currentTicket) return;
+    if (!currentTicket) return false;
 
     const now = new Date().toISOString();
     const { data: ticketData } = await supabase
@@ -428,30 +424,8 @@ const Operator = () => {
       .eq('id', currentTicket.id)
       .single();
 
-    const { error } = await supabase
-      .from('tickets')
-      .update({
-        status: 'served',
-        served_at: now,
-        finished_at: now,
-        in_service: false,
-      })
-      .eq('id', currentTicket.id);
-
-    if (error) {
-      toast({
-        title: 'Erro ao finalizar atendimento',
-        variant: 'destructive',
-      });
-      return false;
-    }
-
-    let durationSeconds = null;
-    if (ticketData?.called_at) {
-      const calledTime = new Date(ticketData.called_at).getTime();
-      const servedTime = new Date(now).getTime();
-      durationSeconds = Math.round((servedTime - calledTime) / 1000);
-    }
+    // NÃO marcar como served aqui - primeiro inserir no doctor_tickets
+    // Depois de inserir com sucesso, marcar a senha original como served
 
     const { data: queueData } = await supabase
       .from('queues')
@@ -530,8 +504,20 @@ const Operator = () => {
             dtFallbackError?.message || 'Verifique a tabela doctor_tickets.',
           variant: 'destructive',
         });
+        return false;
       }
     }
+
+    // Marcar a senha original como "served" após encaminhar com sucesso
+    await supabase
+      .from('tickets')
+      .update({
+        status: 'served',
+        served_at: now,
+        finished_at: now,
+        in_service: false,
+      })
+      .eq('id', currentTicket.id);
 
     const doctorInfo = selectedDoctorName
       ? `Dr(a). ${selectedDoctorName}${
@@ -589,13 +575,11 @@ const Operator = () => {
                 !isAdmin && !isSuperAdmin ? 'ml-auto' : ''
               }`}
             >
-              <Button variant='outline' onClick={openDisplay}>
-                <Monitor className='mr-2 h-4 w-4' />
-                Abrir Display
-              </Button>
               <div className='text-right'>
                 <p className='font-semibold text-foreground'>{operatorName}</p>
-                <p className='text-sm text-muted-foreground'>{counter}</p>
+                <p className='text-sm text-muted-foreground'>
+                  Guichê: {counter}
+                </p>
               </div>
               <Button variant='ghost' onClick={handleLogout}>
                 <LogOut className='mr-2 h-4 w-4' />
@@ -645,7 +629,7 @@ const Operator = () => {
                     <Button
                       size='lg'
                       variant='destructive'
-                      onClick={cancelTicket}
+                      onClick={() => setShowCancelDialog(true)}
                       className='w-full'
                     >
                       <XCircle className='mr-2 h-5 w-5' />
@@ -840,6 +824,66 @@ const Operator = () => {
               disabled={finishing}
             >
               Salvar e Finalizar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Dialog para cancelar senha com motivo */}
+      <Dialog
+        open={showCancelDialog}
+        onOpenChange={(open) => {
+          setShowCancelDialog(open);
+          if (!open) {
+            setCancellationReason('');
+          }
+        }}
+      >
+        <DialogContent className='sm:max-w-md'>
+          <DialogHeader>
+            <DialogTitle>Cancelar Senha</DialogTitle>
+            <DialogDescription>
+              Informe o motivo do cancelamento da senha{' '}
+              <strong>{currentTicket?.display_number}</strong>
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className='space-y-4 py-4'>
+            <div className='space-y-2'>
+              <Label htmlFor='cancellationReason'>
+                Motivo do Cancelamento <span className='text-red-500'>*</span>
+              </Label>
+              <textarea
+                id='cancellationReason'
+                value={cancellationReason}
+                onChange={(e) => setCancellationReason(e.target.value)}
+                maxLength={200}
+                placeholder='Informe o motivo do cancelamento...'
+                className='w-full min-h-[100px] px-3 py-2 text-sm rounded-md border border-input bg-background ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
+              />
+              <p className='text-xs text-muted-foreground text-right'>
+                {cancellationReason.length}/200 caracteres
+              </p>
+            </div>
+          </div>
+
+          <DialogFooter className='gap-2'>
+            <Button
+              variant='outline'
+              onClick={() => {
+                setShowCancelDialog(false);
+                setCancellationReason('');
+              }}
+            >
+              Voltar
+            </Button>
+            <Button
+              variant='destructive'
+              onClick={cancelTicket}
+              disabled={!cancellationReason.trim()}
+            >
+              <XCircle className='mr-2 h-4 w-4' />
+              Confirmar Cancelamento
             </Button>
           </DialogFooter>
         </DialogContent>

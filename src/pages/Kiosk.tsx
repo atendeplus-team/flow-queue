@@ -32,7 +32,7 @@ const Kiosk = () => {
     useState<CompanySettings | null>(null);
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { isAdmin } = useUserRole(currentUser);
+  const { isAdmin, isSuperAdmin } = useUserRole(currentUser);
 
   const enterFullscreen = () => {
     try {
@@ -226,14 +226,16 @@ const Kiosk = () => {
             </Button>
           )}
 
-          <Button
-            variant='ghost'
-            onClick={handleLogout}
-            className={!isAdmin ? 'ml-auto' : ''}
-          >
-            <LogOut className='mr-2 h-4 w-4' />
-            Sair
-          </Button>
+          {(isAdmin || isSuperAdmin) && (
+            <Button
+              variant='ghost'
+              onClick={handleLogout}
+              className={!isAdmin ? 'ml-auto' : ''}
+            >
+              <LogOut className='mr-2 h-4 w-4' />
+              Sair
+            </Button>
+          )}
         </div>
 
         {/* Logo da Empresa */}

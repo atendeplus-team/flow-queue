@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -8,10 +8,18 @@ import { initializeAudioContext } from '@/lib/utils';
 // Modelo da última/recente senha exibida no painel
 interface CurrentTicket {
   id: string;
+  ticket_id?: string; // ID original da tabela tickets (usado quando é doctor_ticket)
   display_number: string;
   queue_code: string;
   counter: string;
   operator_name: string;
+  // Campos para senhas encaminhadas para médico
+  is_doctor_ticket?: boolean;
+  patient_name?: string;
+  doctor_name?: string;
+  specialty?: string;
+  room_number?: string;
+  status?: string; // 'Aguardando' ou 'in_service'
 }
 
 // Estatísticas de fila para o cabeçalho lateral
@@ -40,6 +48,13 @@ const Display = () => {
   const [currentTicket, setCurrentTicket] = useState<CurrentTicket | null>(
     null
   );
+  const currentTicketRef = useRef<CurrentTicket | null>(null);
+
+  // Manter a ref atualizada sempre que currentTicket mudar
+  useEffect(() => {
+    currentTicketRef.current = currentTicket;
+  }, [currentTicket]);
+
   const [recentTickets, setRecentTickets] = useState<CurrentTicket[]>([]);
   const [waitingStats, setWaitingStats] = useState<WaitingStats>({
     total: 0,
@@ -121,26 +136,104 @@ const Display = () => {
   const loadCurrentTicket = async () => {
     const todayStart = getTodayStart();
 
-    const { data } = await supabase
-      .from('tickets')
-      .select('id, display_number, prefix, counter, operator_name')
-      .eq('status', 'called')
+    // Primeiro, verificar se existe um doctor_ticket sendo chamado pelo médico
+    // Busca tickets com status 'Aguardando' (chamado mas não confirmado) ou in_service=true (confirmado)
+    const { data: doctorTicketCalled } = await (supabase as any)
+      .from('doctor_tickets')
+      .select(
+        `
+        id,
+        ticket_id,
+        display_number,
+        patient_name,
+        doctor_id,
+        doctor_name,
+        counter,
+        queue_code,
+        operator_name,
+        called_at,
+        status,
+        in_service
+      `
+      )
+      .is('finished_at', null)
+      .not('called_at', 'is', null)
       .gte('created_at', todayStart)
       .order('called_at', { ascending: false })
       .limit(1)
-      .single();
+      .maybeSingle();
 
-    if (data) {
+    // Se existir doctor_ticket chamado pelo médico, mostrar ele
+    if (doctorTicketCalled && doctorTicketCalled.patient_name) {
+      let doctorName = doctorTicketCalled.doctor_name || 'Médico';
+      let roomNumber = doctorTicketCalled.counter || '';
+      let specialty = '';
+
+      if (doctorTicketCalled.doctor_id) {
+        const { data: doctorProfile } = await (supabase as any)
+          .from('profiles')
+          .select(
+            `
+            full_name,
+            company,
+            specialty_id,
+            medical_specialties (name)
+          `
+          )
+          .eq('id', doctorTicketCalled.doctor_id)
+          .single();
+
+        if (doctorProfile) {
+          doctorName = doctorProfile.full_name || doctorName;
+          roomNumber = doctorProfile.company || roomNumber;
+          specialty = doctorProfile.medical_specialties?.name || '';
+        }
+      }
+
+      console.log('🩺 Doctor ticket em atendimento:', doctorTicketCalled);
+
       setCurrentTicket({
-        id: data.id,
-        display_number: data.display_number,
-        queue_code: data.prefix || '',
-        counter: data.counter || 'Guichê',
-        operator_name: data.operator_name || '',
+        id: doctorTicketCalled.id,
+        ticket_id: doctorTicketCalled.ticket_id, // ID original da senha na tabela tickets
+        display_number: doctorTicketCalled.display_number,
+        queue_code: doctorTicketCalled.queue_code || '',
+        counter: roomNumber,
+        operator_name: doctorTicketCalled.operator_name || '',
+        is_doctor_ticket: true,
+        patient_name: doctorTicketCalled.patient_name,
+        doctor_name: doctorName,
+        specialty: specialty,
+        room_number: roomNumber,
+        status:
+          doctorTicketCalled.status ||
+          (doctorTicketCalled.in_service ? 'in_service' : 'Aguardando'),
       });
+    } else {
+      // Buscar senha normal chamada por operador
+      const { data, error } = await supabase
+        .from('tickets')
+        .select('id, display_number, prefix, counter, operator_name')
+        .eq('status', 'called')
+        .gte('created_at', todayStart)
+        .order('called_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (data) {
+        // Senha normal chamada pelo operador
+        setCurrentTicket({
+          id: data.id,
+          display_number: data.display_number,
+          queue_code: data.prefix || '',
+          counter: data.counter || 'Guichê',
+          operator_name: data.operator_name || '',
+        });
+      } else {
+        setCurrentTicket(null);
+      }
     }
 
-    // Carregar as últimas 5 senhas chamadas (apenas do dia de hoje)
+    // Carregar as últimas 4 senhas chamadas (apenas do dia de hoje)
     const { data: recentData } = await supabase
       .from('tickets')
       .select('id, display_number, prefix, counter, operator_name')
@@ -148,7 +241,12 @@ const Display = () => {
       .gte('created_at', todayStart)
       .not('counter', 'is', null)
       .order('served_at', { ascending: false })
-      .limit(5);
+      .limit(4);
+
+    console.log('🔍 DEBUG - Senhas recentes:', recentData?.length || 0);
+    if (recentData && recentData.length > 0) {
+      console.log('   Primeira senha recente:', recentData[0]?.display_number);
+    }
 
     if (recentData) {
       setRecentTickets(
@@ -214,12 +312,31 @@ const Display = () => {
 
   // Síntese de voz para anunciar senha e guichê
   const speakTicket = (ticket: CurrentTicket) => {
+    // Tentar habilitar áudio se ainda não estiver
+    if (!audioEnabled) {
+      setAudioEnabled(true);
+    }
+
     // Cancelar qualquer fala anterior
     window.speechSynthesis.cancel();
 
     setTimeout(() => {
-      const ticketNumber = ticket.display_number.replace(/^[A-Z]+-/, '');
-      const text = `Senha ${ticketNumber}, por favor, dirija-se ao guichê ${ticket.counter}`;
+      let text = '';
+
+      if (ticket.is_doctor_ticket && ticket.patient_name) {
+        // Voz para senha encaminhada ao médico
+        const doctorName = ticket.doctor_name || 'médico';
+        const specialty = ticket.specialty ? `, ${ticket.specialty}` : '';
+        const room = ticket.room_number || ticket.counter || 'consultório';
+        text = `${ticket.patient_name}, dirija-se à sala ${room}, com doutor ${doctorName}${specialty}`;
+      } else {
+        // Voz para senha normal do operador
+        const ticketNumber = ticket.display_number.replace(/^[A-Z]+-/, '');
+        const prefix = ticket.display_number.split('-')[0] || '';
+        const queueType = prefix.includes('PR') ? 'Preferencial' : 'Normal';
+        text = `Senha ${queueType}, número ${ticketNumber}, por favor, dirija-se ao guichê ${ticket.counter}`;
+      }
+
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = 'pt-BR';
       utterance.rate = 0.85;
@@ -227,15 +344,26 @@ const Display = () => {
       utterance.volume = 1.0;
 
       utterance.onerror = (event) => {
-        console.error('Erro na síntese de voz:', event);
-        // Se falhar, tentar ativar áudio
+        // Ignorar erro "not-allowed" silenciosamente (navegador bloqueou)
+        if (event.error === 'not-allowed') {
+          console.log(
+            '🔇 Áudio bloqueado pelo navegador. Clique no botão "Ativar Áudio".'
+          );
+          setAudioEnabled(false);
+        } else {
+          console.error('Erro na síntese de voz:', event.error);
+        }
+      };
+
+      utterance.onstart = () => {
+        console.log('✅ Áudio funcionando!');
       };
 
       window.speechSynthesis.speak(utterance);
     }, 300);
   };
 
-  // Inscrição em atualizações de tickets (called/served) para atualizar painel e voz
+  // Inscrição em atualizações de tickets (called/served/cancelled) para atualizar painel e voz
   const setupRealtime = () => {
     const channelCalled = supabase
       .channel('tickets-display-called')
@@ -249,6 +377,10 @@ const Display = () => {
         },
         (payload) => {
           const newTicket = payload.new as any;
+          console.log(
+            '🔴 REALTIME - Nova senha chamada:',
+            newTicket.display_number
+          );
           const ticket: CurrentTicket = {
             id: newTicket.id,
             display_number: newTicket.display_number,
@@ -277,6 +409,11 @@ const Display = () => {
         },
         (payload) => {
           const t = payload.new as any;
+          console.log(
+            '✅ REALTIME - Senha marcada como served:',
+            t.display_number
+          );
+
           const servedTicket: CurrentTicket = {
             id: t.id,
             display_number: t.display_number,
@@ -284,12 +421,196 @@ const Display = () => {
             counter: t.counter || 'Guichê',
             operator_name: t.operator_name || '',
           };
+
+          // Adicionar às últimas chamadas
           setRecentTickets((prev) =>
             [
               servedTicket,
               ...prev.filter((p) => p.id !== servedTicket.id),
-            ].slice(0, 5)
+            ].slice(0, 4)
           );
+
+          // Se a senha que foi marcada como served for a que está sendo exibida, limpa o display
+          // Verifica tanto o ID direto quanto o ticket_id (para doctor_tickets)
+          const curr = currentTicketRef.current;
+          if (curr && (curr.id === t.id || curr.ticket_id === t.id)) {
+            console.log(
+              '🧹 Limpando display - senha foi encaminhada/finalizada'
+            );
+            setCurrentTicket(null);
+          }
+        }
+      )
+      .subscribe();
+
+    // Listener para senhas canceladas - limpa o display atual
+    const channelCancelled = supabase
+      .channel('tickets-display-cancelled')
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'tickets',
+          filter: 'status=eq.cancelled',
+        },
+        (payload) => {
+          const cancelledTicket = payload.new as any;
+          console.log(
+            '🚫 REALTIME - Senha cancelada:',
+            cancelledTicket.display_number
+          );
+
+          // Se a senha cancelada for a que está sendo exibida, limpa o display
+          const curr = currentTicketRef.current;
+          if (
+            curr &&
+            (curr.id === cancelledTicket.id ||
+              curr.ticket_id === cancelledTicket.id)
+          ) {
+            console.log('🧹 Limpando display - senha foi cancelada');
+            setCurrentTicket(null);
+          }
+        }
+      )
+      .subscribe();
+
+    // Listener para quando um doctor_ticket é criado (senha encaminhada para médico)
+    // Apenas log - a senha vai para histórico (served), não precisa atualizar o display
+    const channelDoctorTicketInsert = supabase
+      .channel('doctor-tickets-display-insert')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'doctor_tickets',
+        },
+        (payload) => {
+          const doctorTicket = payload.new as any;
+          console.log(
+            '🩺 REALTIME - Senha encaminhada para médico (aguardando chamada):',
+            doctorTicket.display_number
+          );
+          // Não atualiza o display aqui - a senha agora vai para o histórico
+          // O display será atualizado quando o médico CHAMAR a senha (UPDATE com in_service=true)
+        }
+      )
+      .subscribe();
+
+    // Listener para quando o MÉDICO chama a senha (UPDATE em doctor_tickets com in_service=true)
+    const channelDoctorTicketCalled = supabase
+      .channel('doctor-tickets-display-called')
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'doctor_tickets',
+        },
+        async (payload) => {
+          const doctorTicket = payload.new as any;
+
+          console.log('🔵 REALTIME - UPDATE doctor_tickets recebido:', {
+            id: doctorTicket.id,
+            display_number: doctorTicket.display_number,
+            patient_name: doctorTicket.patient_name,
+            status: doctorTicket.status,
+            in_service: doctorTicket.in_service,
+            finished_at: doctorTicket.finished_at,
+            called_at: doctorTicket.called_at,
+          });
+
+          // Se o médico finalizou o atendimento (finished_at preenchido), limpar o display
+          if (doctorTicket.finished_at !== null) {
+            console.log(
+              '✅ REALTIME - Médico finalizou atendimento:',
+              doctorTicket.display_number,
+              doctorTicket.patient_name
+            );
+
+            // Se a senha finalizada for a que está sendo exibida, limpa o display
+            const curr = currentTicketRef.current;
+            if (
+              curr &&
+              (curr.id === doctorTicket.id ||
+                curr.ticket_id === doctorTicket.ticket_id)
+            ) {
+              console.log('🧹 Limpando display - médico finalizou atendimento');
+              setCurrentTicket(null);
+            }
+            return;
+          }
+
+          // Processa se o ticket foi chamado (tem called_at) e tem paciente
+          if (doctorTicket.called_at && doctorTicket.patient_name) {
+            console.log(
+              '🩺 REALTIME - Ticket do médico atualizado:',
+              doctorTicket.display_number,
+              doctorTicket.patient_name,
+              'Status:',
+              doctorTicket.status
+            );
+
+            // Buscar dados do médico
+            let doctorName = doctorTicket.doctor_name || 'Médico';
+            let roomNumber = doctorTicket.counter || '';
+            let specialty = '';
+
+            if (doctorTicket.doctor_id) {
+              const { data: doctorProfile } = await (supabase as any)
+                .from('profiles')
+                .select(
+                  `
+                  full_name,
+                  company,
+                  specialty_id,
+                  medical_specialties (name)
+                `
+                )
+                .eq('id', doctorTicket.doctor_id)
+                .single();
+
+              if (doctorProfile) {
+                doctorName = doctorProfile.full_name || doctorName;
+                roomNumber = doctorProfile.company || roomNumber;
+                specialty = doctorProfile.medical_specialties?.name || '';
+              }
+            }
+
+            const ticket: CurrentTicket = {
+              id: doctorTicket.id,
+              ticket_id: doctorTicket.ticket_id, // ID original da senha
+              display_number: doctorTicket.display_number,
+              queue_code: doctorTicket.queue_code || '',
+              counter: roomNumber,
+              operator_name: doctorTicket.operator_name || '',
+              is_doctor_ticket: true,
+              patient_name: doctorTicket.patient_name,
+              doctor_name: doctorName,
+              specialty: specialty,
+              room_number: roomNumber,
+              status:
+                doctorTicket.status ||
+                (doctorTicket.in_service ? 'in_service' : 'Aguardando'),
+            };
+
+            // Verifica se é o mesmo ticket que já está sendo exibido
+            const curr = currentTicketRef.current;
+            const isSameTicket =
+              curr &&
+              (curr.id === doctorTicket.id ||
+                curr.ticket_id === doctorTicket.ticket_id);
+
+            setCurrentTicket(ticket);
+
+            // Só faz blink e fala se for uma nova chamada (não apenas atualização de status)
+            if (!isSameTicket) {
+              setBlink(true);
+              setTimeout(() => setBlink(false), 1000);
+              speakTicket(ticket);
+            }
+          }
         }
       )
       .subscribe();
@@ -297,14 +618,34 @@ const Display = () => {
     return () => {
       supabase.removeChannel(channelCalled);
       supabase.removeChannel(channelServed);
+      supabase.removeChannel(channelCancelled);
+      supabase.removeChannel(channelDoctorTicketInsert);
+      supabase.removeChannel(channelDoctorTicketCalled);
     };
   };
 
   const enableAudio = () => {
     setAudioEnabled(true);
+
+    // Inicializar AudioContext
+    try {
+      const audioContext = new (window.AudioContext ||
+        (window as any).webkitAudioContext)();
+      if (audioContext.state === 'suspended') {
+        audioContext.resume();
+      }
+    } catch (error) {
+      console.log('Não foi possível inicializar AudioContext');
+    }
+
     // Testar a síntese de voz
     const utterance = new SpeechSynthesisUtterance('Sistema de áudio ativado');
     utterance.lang = 'pt-BR';
+    utterance.onerror = (event) => {
+      if (event.error !== 'not-allowed') {
+        console.error('Erro ao testar áudio:', event.error);
+      }
+    };
     window.speechSynthesis.speak(utterance);
   };
 
@@ -388,7 +729,7 @@ const Display = () => {
                         Senha
                       </span>
                       <div className='text-3xl font-black text-white'>
-                        {ticket.display_number.replace(/^[A-Z]+-/, '')}
+                        {ticket.display_number}
                       </div>
                     </div>
                     <div className='flex flex-col items-end gap-0.5'>
@@ -462,47 +803,108 @@ const Display = () => {
 
             <div className='relative p-6'>
               {currentTicket ? (
-                <div className='flex items-center justify-between gap-8'>
-                  {/* Lado Esquerdo - Ícone e Título */}
-                  <div className='flex items-center gap-4 min-w-0'>
-                    <div className='flex-shrink-0 p-3 bg-white/15 rounded-2xl backdrop-blur-md border-2 border-white/20 shadow-lg'>
-                      <Volume2 className='h-8 w-8 text-white animate-pulse' />
+                currentTicket.is_doctor_ticket ? (
+                  // Layout para senha encaminhada ao médico (igual ao operador, com diferenças)
+                  <div className='flex items-center justify-between gap-8'>
+                    {/* Lado Esquerdo - Ícone e Título */}
+                    <div className='flex items-center gap-4 min-w-0'>
+                      <div className='flex-shrink-0 p-3 bg-white/15 rounded-2xl backdrop-blur-md border-2 border-white/20 shadow-lg'>
+                        <Volume2 className='h-8 w-8 text-white animate-pulse' />
+                      </div>
+                      <div className='flex flex-col justify-center min-w-0'>
+                        <span className='text-white/80 text-lg font-bold tracking-wide uppercase'>
+                          Senha Chamada
+                        </span>
+                        <div className='h-0.5 w-16 bg-white/30 rounded-full mt-1'></div>
+                      </div>
                     </div>
-                    <div className='flex flex-col justify-center min-w-0'>
-                      <span className='text-white/80 text-lg font-bold tracking-wide uppercase'>
-                        Senha Chamada
-                      </span>
-                      <div className='h-0.5 w-16 bg-white/30 rounded-full mt-1'></div>
-                    </div>
-                  </div>
 
-                  {/* Centro - Número da Senha */}
-                  <div className='flex items-center justify-center flex-1'>
-                    <div className='text-center'>
-                      <p className='text-white/70 text-lg mb-2 font-semibold uppercase tracking-wider'>
-                        Atendimento
-                      </p>
-                      <div className='relative'>
-                        <div className='absolute inset-0 bg-white/20 blur-2xl rounded-full'></div>
-                        <div className='relative text-7xl font-black text-white tracking-tight leading-none drop-shadow-2xl'>
-                          {currentTicket.display_number.replace(/^[A-Z]+-/, '')}
+                    {/* Centro - Nome do Paciente (em vez do número da senha) */}
+                    <div className='flex items-center justify-center flex-1'>
+                      <div className='text-center'>
+                        <p
+                          className={`text-lg mb-2 font-semibold uppercase tracking-wider ${
+                            currentTicket.status === 'in_service'
+                              ? 'text-green-400'
+                              : 'text-yellow-400'
+                          }`}
+                        >
+                          {currentTicket.status === 'in_service'
+                            ? 'Em Atendimento'
+                            : 'Aguardando'}
+                        </p>
+                        <div className='relative'>
+                          <div className='absolute inset-0 bg-white/20 blur-2xl rounded-full'></div>
+                          <div className='relative text-5xl font-black text-white tracking-tight leading-none drop-shadow-2xl'>
+                            {currentTicket.patient_name}
+                          </div>
                         </div>
+                        {/* Nome do médico abaixo do nome do paciente */}
+                        <p className='text-white/80 text-xl font-semibold mt-3'>
+                          <span className='font-bold text-white/60 mr-1'>
+                            Médico:
+                          </span>{' '}
+                          {currentTicket.doctor_name}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Direita - Sala (em vez de Guichê) */}
+                    <div className='flex items-center'>
+                      <div className='text-center bg-white/15 backdrop-blur-md rounded-2xl px-6 py-4 border-2 border-white/20 shadow-xl'>
+                        <p className='text-white/80 text-sm mb-2 font-semibold uppercase tracking-wider'>
+                          Sala
+                        </p>
+                        <p className='text-5xl font-black text-white tracking-tight'>
+                          {currentTicket.room_number || currentTicket.counter}
+                        </p>
                       </div>
                     </div>
                   </div>
+                ) : (
+                  // Layout para senha normal do operador
+                  <div className='flex items-center justify-between gap-8'>
+                    {/* Lado Esquerdo - Ícone e Título */}
+                    <div className='flex items-center gap-4 min-w-0'>
+                      <div className='flex-shrink-0 p-3 bg-white/15 rounded-2xl backdrop-blur-md border-2 border-white/20 shadow-lg'>
+                        <Volume2 className='h-8 w-8 text-white animate-pulse' />
+                      </div>
+                      <div className='flex flex-col justify-center min-w-0'>
+                        <span className='text-white/80 text-lg font-bold tracking-wide uppercase'>
+                          Senha Chamada
+                        </span>
+                        <div className='h-0.5 w-16 bg-white/30 rounded-full mt-1'></div>
+                      </div>
+                    </div>
 
-                  {/* Direita - Guichê */}
-                  <div className='flex items-center'>
-                    <div className='text-center bg-white/15 backdrop-blur-md rounded-2xl px-6 py-4 border-2 border-white/20 shadow-xl'>
-                      <p className='text-white/80 text-sm mb-2 font-semibold uppercase tracking-wider'>
-                        Guichê
-                      </p>
-                      <p className='text-5xl font-black text-white tracking-tight'>
-                        {currentTicket.counter}
-                      </p>
+                    {/* Centro - Número da Senha */}
+                    <div className='flex items-center justify-center flex-1'>
+                      <div className='text-center'>
+                        <p className='text-white/70 text-lg mb-2 font-semibold uppercase tracking-wider'>
+                          Atendimento
+                        </p>
+                        <div className='relative'>
+                          <div className='absolute inset-0 bg-white/20 blur-2xl rounded-full'></div>
+                          <div className='relative text-7xl font-black text-white tracking-tight leading-none drop-shadow-2xl'>
+                            {currentTicket.display_number}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Direita - Guichê */}
+                    <div className='flex items-center'>
+                      <div className='text-center bg-white/15 backdrop-blur-md rounded-2xl px-6 py-4 border-2 border-white/20 shadow-xl'>
+                        <p className='text-white/80 text-sm mb-2 font-semibold uppercase tracking-wider'>
+                          Guichê
+                        </p>
+                        <p className='text-5xl font-black text-white tracking-tight'>
+                          {currentTicket.counter}
+                        </p>
+                      </div>
                     </div>
                   </div>
-                </div>
+                )
               ) : (
                 <div className='flex items-center justify-center gap-4 py-4'>
                   <div className='p-3 bg-white/15 rounded-2xl backdrop-blur-md border-2 border-white/20'>
@@ -565,6 +967,20 @@ const Display = () => {
                     />
                   ))}
                 </div>
+              )}
+
+              {/* Botão de Áudio */}
+              {!audioEnabled && (
+                <button
+                  onClick={enableAudio}
+                  className='absolute top-4 left-4 z-10 p-3 bg-red-600/90 hover:bg-red-700/90 rounded-lg border border-red-500/50 backdrop-blur-sm transition-all duration-200 hover:scale-105 flex items-center gap-2 shadow-lg'
+                  title='Clique para ativar o áudio'
+                >
+                  <Volume2 className='w-5 h-5 text-white' />
+                  <span className='text-white font-semibold text-sm'>
+                    Ativar Áudio
+                  </span>
+                </button>
               )}
 
               {/* Botão Fullscreen */}

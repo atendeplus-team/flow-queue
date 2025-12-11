@@ -20,6 +20,7 @@ import {
   LogOut,
   BarChart3,
   Home,
+  Eye,
 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -78,6 +79,7 @@ interface RealtimeTicket {
   called_at: string | null;
   served_at: string | null;
   cancelled_at: string | null;
+  cancellation_reason: string | null;
   wait_time: number; // em minutos
 }
 
@@ -138,6 +140,16 @@ const Admin = () => {
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [sortBy, setSortBy] = useState<string>('created_at_desc');
   const [loadingRealtime, setLoadingRealtime] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 10;
+
+  // Modal de motivo de cancelamento
+  const [showCancellationReasonModal, setShowCancellationReasonModal] =
+    useState(false);
+  const [selectedCancellationReason, setSelectedCancellationReason] = useState<{
+    display_number: string;
+    reason: string;
+  } | null>(null);
 
   // Verifica sessão inicial
   useEffect(() => {
@@ -183,6 +195,11 @@ const Admin = () => {
       return () => clearInterval(interval);
     }
   }, [currentUser, isVisitor, roleLoading]);
+
+  // Reseta a página quando mudar filtro ou ordenação
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [statusFilter, sortBy]);
 
   // Lista de filas; operações de criação/edição/exclusão são RLS-restritas a admin
   const loadQueues = async () => {
@@ -933,7 +950,7 @@ const Admin = () => {
       const { data: tickets, error } = await supabase
         .from('tickets')
         .select(
-          'id, display_number, status, created_at, called_at, served_at, cancelled_at'
+          'id, display_number, status, created_at, called_at, served_at, cancelled_at, cancellation_reason'
         )
         .gte('created_at', today.toISOString())
         .order('created_at', { ascending: false });
@@ -982,6 +999,7 @@ const Admin = () => {
             called_at: ticket.called_at,
             served_at: ticket.served_at,
             cancelled_at: ticket.cancelled_at,
+            cancellation_reason: ticket.cancellation_reason,
             wait_time: waitTime,
           };
         }
@@ -1709,6 +1727,9 @@ const Admin = () => {
                         <th className='text-left py-3 px-4 font-semibold text-foreground'>
                           Cancelamento
                         </th>
+                        <th className='text-center py-3 px-4 font-semibold text-foreground'>
+                          Motivo
+                        </th>
                         <th className='text-right py-3 px-4 font-semibold text-foreground'>
                           Tempo de Espera
                         </th>
@@ -1765,6 +1786,10 @@ const Admin = () => {
                           }
                           return 0;
                         })
+                        .slice(
+                          (currentPage - 1) * itemsPerPage,
+                          currentPage * itemsPerPage
+                        )
                         .map((ticket) => {
                           const statusColors = {
                             waiting: 'bg-yellow-500/10 text-yellow-600',
@@ -1836,6 +1861,31 @@ const Admin = () => {
                                     })
                                   : '-'}
                               </td>
+                              <td className='py-3 px-4 text-center'>
+                                {ticket.status === 'cancelled' &&
+                                ticket.cancellation_reason ? (
+                                  <Button
+                                    variant='ghost'
+                                    size='sm'
+                                    className='h-8 w-8 p-0'
+                                    title='Ver motivo do cancelamento'
+                                    onClick={() => {
+                                      setSelectedCancellationReason({
+                                        display_number: ticket.display_number,
+                                        reason:
+                                          ticket.cancellation_reason || '',
+                                      });
+                                      setShowCancellationReasonModal(true);
+                                    }}
+                                  >
+                                    <Eye className='h-4 w-4 text-red-500' />
+                                  </Button>
+                                ) : (
+                                  <span className='text-muted-foreground'>
+                                    -
+                                  </span>
+                                )}
+                              </td>
                               <td className='py-3 px-4 text-right'>
                                 <span className='font-bold text-primary text-lg'>
                                   {ticket.wait_time} min
@@ -1846,14 +1896,64 @@ const Admin = () => {
                         })}
                     </tbody>
                   </table>
-                  {realtimeTickets.filter(
-                    (ticket) =>
-                      statusFilter === 'all' || ticket.status === statusFilter
-                  ).length === 0 && (
-                    <p className='text-center text-muted-foreground py-8'>
-                      Nenhum ticket encontrado
-                    </p>
-                  )}
+                  {(() => {
+                    const filteredTickets = realtimeTickets.filter(
+                      (ticket) =>
+                        statusFilter === 'all' || ticket.status === statusFilter
+                    );
+
+                    if (filteredTickets.length === 0) {
+                      return (
+                        <p className='text-center text-muted-foreground py-8'>
+                          Nenhum ticket encontrado
+                        </p>
+                      );
+                    }
+
+                    const totalPages = Math.ceil(
+                      filteredTickets.length / itemsPerPage
+                    );
+
+                    return (
+                      <div className='mt-4 flex items-center justify-between border-t pt-4'>
+                        <p className='text-sm text-muted-foreground'>
+                          Mostrando {(currentPage - 1) * itemsPerPage + 1} a{' '}
+                          {Math.min(
+                            currentPage * itemsPerPage,
+                            filteredTickets.length
+                          )}{' '}
+                          de {filteredTickets.length} senhas
+                        </p>
+                        <div className='flex items-center gap-2'>
+                          <Button
+                            variant='outline'
+                            size='sm'
+                            onClick={() =>
+                              setCurrentPage((prev) => Math.max(1, prev - 1))
+                            }
+                            disabled={currentPage === 1}
+                          >
+                            Anterior
+                          </Button>
+                          <span className='text-sm text-muted-foreground'>
+                            Página {currentPage} de {totalPages}
+                          </span>
+                          <Button
+                            variant='outline'
+                            size='sm'
+                            onClick={() =>
+                              setCurrentPage((prev) =>
+                                Math.min(totalPages, prev + 1)
+                              )
+                            }
+                            disabled={currentPage === totalPages}
+                          >
+                            Próxima
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </Card>
@@ -2206,6 +2306,43 @@ const Admin = () => {
               </Button>
               <Button onClick={handleSaveQueue}>
                 {editingQueue ? 'Salvar' : 'Criar'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Modal para exibir motivo do cancelamento */}
+        <Dialog
+          open={showCancellationReasonModal}
+          onOpenChange={setShowCancellationReasonModal}
+        >
+          <DialogContent className='sm:max-w-lg max-w-[90vw]'>
+            <DialogHeader>
+              <DialogTitle className='flex items-center gap-2'>
+                <Eye className='h-5 w-5 text-red-500' />
+                Motivo do Cancelamento
+              </DialogTitle>
+              <DialogDescription className='break-words'>
+                Senha:{' '}
+                <strong>{selectedCancellationReason?.display_number}</strong>
+              </DialogDescription>
+            </DialogHeader>
+            <div className='py-4 max-h-[60vh] overflow-y-auto'>
+              <div className='rounded-lg bg-red-50 dark:bg-red-950/20 p-4 border border-red-200 dark:border-red-800'>
+                <p className='text-foreground break-words overflow-wrap-anywhere whitespace-pre-wrap'>
+                  {selectedCancellationReason?.reason || 'Motivo não informado'}
+                </p>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button
+                variant='outline'
+                onClick={() => {
+                  setShowCancellationReasonModal(false);
+                  setSelectedCancellationReason(null);
+                }}
+              >
+                Fechar
               </Button>
             </DialogFooter>
           </DialogContent>
