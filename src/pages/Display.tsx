@@ -763,7 +763,7 @@ const Display = () => {
 
         {/* Logo da Empresa */}
         <div className='px-4 pb-4'>
-          <div className='rounded-xl bg-gradient-to-br from-slate-800/60 to-slate-900/60 p-6 border border-slate-700/40 backdrop-blur-sm shadow-lg'>
+          <div className='rounded-xl bg-white p-6 border border-slate-700/40 backdrop-blur-sm shadow-lg'>
             <div className='flex items-center justify-center'>
               {companySettings?.logo_url ? (
                 <img
