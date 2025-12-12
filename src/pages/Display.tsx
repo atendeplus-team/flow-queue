@@ -510,6 +510,7 @@ const Display = () => {
         },
         async (payload) => {
           const doctorTicket = payload.new as any;
+          const oldDoctorTicket = payload.old as any;
 
           console.log('🔵 REALTIME - UPDATE doctor_tickets recebido:', {
             id: doctorTicket.id,
@@ -519,6 +520,7 @@ const Display = () => {
             in_service: doctorTicket.in_service,
             finished_at: doctorTicket.finished_at,
             called_at: doctorTicket.called_at,
+            old_called_at: oldDoctorTicket?.called_at,
           });
 
           // Se o médico finalizou o atendimento (finished_at preenchido), limpar o display
@@ -602,13 +604,30 @@ const Display = () => {
               (curr.id === doctorTicket.id ||
                 curr.ticket_id === doctorTicket.ticket_id);
 
+            // Verifica se é uma rechamada (called_at foi atualizado)
+            const isRepeatCall = isSameTicket && 
+                                oldDoctorTicket?.called_at &&
+                                doctorTicket.called_at !== oldDoctorTicket.called_at;
+
+            console.log('🔍 Verificação de rechamada:', {
+              isSameTicket,
+              isRepeatCall,
+              old_called_at: oldDoctorTicket?.called_at,
+              new_called_at: doctorTicket.called_at,
+              current_id: curr?.id,
+              doctor_ticket_id: doctorTicket.id
+            });
+
             setCurrentTicket(ticket);
 
-            // Só faz blink e fala se for uma nova chamada (não apenas atualização de status)
-            if (!isSameTicket) {
+            // Faz blink e fala se for nova chamada OU rechamada
+            if (!isSameTicket || isRepeatCall) {
+              console.log('🔊 Reproduzindo voz:', isRepeatCall ? 'RECHAMADA' : 'NOVA CHAMADA');
               setBlink(true);
               setTimeout(() => setBlink(false), 1000);
               speakTicket(ticket);
+            } else {
+              console.log('❌ Voz NÃO reproduzida - mesmo ticket sem alteração em called_at');
             }
           }
         }
@@ -763,7 +782,7 @@ const Display = () => {
 
         {/* Logo da Empresa */}
         <div className='px-4 pb-4'>
-          <div className='rounded-xl bg-white p-6 border border-slate-700/40 backdrop-blur-sm shadow-lg'>
+          <div className='rounded-xl bg-gradient-to-br from-slate-800/60 to-slate-900/60 p-6 border border-slate-700/40 backdrop-blur-sm shadow-lg'>
             <div className='flex items-center justify-center'>
               {companySettings?.logo_url ? (
                 <img
@@ -982,6 +1001,38 @@ const Display = () => {
                   </span>
                 </button>
               )}
+
+              {/* Botão Fullscreen */}
+              <button
+                onClick={toggleFullscreen}
+                className='absolute top-4 right-4 z-10 p-2 bg-slate-900/80 hover:bg-slate-800/80 rounded-lg border border-slate-700/50 backdrop-blur-sm transition-all duration-200 hover:scale-105'
+                title={
+                  isFullscreen ? 'Sair do Fullscreen' : 'Entrar em Fullscreen'
+                }
+              >
+                <svg
+                  className='w-6 h-6 text-white'
+                  fill='none'
+                  viewBox='0 0 24 24'
+                  stroke='currentColor'
+                >
+                  {isFullscreen ? (
+                    <path
+                      strokeLinecap='round'
+                      strokeLinejoin='round'
+                      strokeWidth={2}
+                      d='M6 18L18 6M6 6l12 12'
+                    />
+                  ) : (
+                    <path
+                      strokeLinecap='round'
+                      strokeLinejoin='round'
+                      strokeWidth={2}
+                      d='M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4'
+                    />
+                  )}
+                </svg>
+              </button>
             </div>
           ) : (
             <div className='w-full h-full bg-gradient-to-br from-slate-800/20 to-slate-900/20 rounded-3xl border-2 border-dashed border-slate-700/30 flex items-center justify-center backdrop-blur-sm shadow-inner'>

@@ -69,80 +69,32 @@ export const silentPrintTicket = async (
   queue: MinimalQueue
 ): Promise<boolean> => {
   try {
-    // TEMPORÁRIO: Impressão direto na impressora padrão do Windows
-    const pt = new Intl.DateTimeFormat('pt-BR', {
-      dateStyle: 'short',
-      timeStyle: 'short',
-    }).format(new Date(ticket.created_at));
-
-    const getPriorityLabel = (priority: string) => {
-      const labels: Record<string, string> = {
-        normal: 'Normal',
-        elderly: 'Idoso',
-        pregnant: 'Gestante',
-        disabled: 'PcD',
-      };
-      return labels[priority] || priority;
-    };
-
-    // Cria uma janela oculta para impressão
-    const printWindow = window.open('', '_blank', 'width=300,height=400');
-    if (!printWindow) {
-      console.error('Não foi possível abrir janela de impressão');
+    const settings = await getPrinterSettings();
+    
+    if (!settings?.print_server_url) {
+      console.warn('Servidor de impressão não configurado.');
       return false;
     }
 
-    printWindow.document.write(`
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="UTF-8">
-        <title>Impressão Senha</title>
-        <style>
-          @page {
-            size: 80mm auto;
-            margin: 0;
-          }
-          body {
-            font-family: 'Courier New', monospace;
-            text-align: center;
-            padding: 10px;
-            margin: 0;
-          }
-          .queue-name {
-            font-size: 14px;
-            font-weight: bold;
-            margin-bottom: 10px;
-          }
-          .ticket-number {
-            font-size: 48px;
-            font-weight: bold;
-            margin: 20px 0;
-          }
-          .info {
-            font-size: 12px;
-            margin: 5px 0;
-          }
-        </style>
-      </head>
-      <body>
-        <div class="queue-name">${queue.name}</div>
-        <div class="ticket-number">${ticket.display_number}</div>
-        <div class="info">${pt}</div>
-        <div class="info">${getPriorityLabel(ticket.priority)}</div>
-      </body>
-      </html>
-    `);
-
-    printWindow.document.close();
+    const escposData = buildEscPos(ticket, queue);
     
-    // Aguarda o carregamento e imprime
-    setTimeout(() => {
-      printWindow.print();
-      setTimeout(() => {
-        printWindow.close();
-      }, 500);
-    }, 250);
+    // Envia apenas os dados ESC/POS - backend busca IP/porta do Supabase
+    const response = await fetch(`${settings.print_server_url}/print`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        data: Array.from(escposData),
+      }),
+    });
+
+    const data = await response.json();
+    
+    if (!response.ok || !data.success) {
+      console.error('Erro ao enviar impressão:', data.error);
+      return false;
+    }
 
     return true;
   } catch (e) {

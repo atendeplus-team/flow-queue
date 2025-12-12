@@ -21,6 +21,7 @@ import {
   BarChart3,
   Home,
   Eye,
+  History,
 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -44,6 +45,8 @@ import {
 } from '@/components/ui/dialog';
 import { createQueueSchema, logoUrlSchema } from '@/lib/validations';
 import * as XLSX from 'xlsx';
+import TicketHistoryModal from '@/components/TicketHistoryModal';
+import TicketHistoryManagement from '@/components/TicketHistoryManagement';
 
 interface Stats {
   totalToday: number;
@@ -150,6 +153,16 @@ const Admin = () => {
     display_number: string;
     reason: string;
   } | null>(null);
+
+  // Modal de histórico da senha
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [selectedTicketForHistory, setSelectedTicketForHistory] = useState<{
+    id: string;
+    display_number: string;
+  } | null>(null);
+
+  // Modal de gerenciamento de histórico de senhas
+  const [showHistoryManagement, setShowHistoryManagement] = useState(false);
 
   // Verifica sessão inicial
   useEffect(() => {
@@ -1730,6 +1743,9 @@ const Admin = () => {
                         <th className='text-center py-3 px-4 font-semibold text-foreground'>
                           Motivo
                         </th>
+                        <th className='text-center py-3 px-4 font-semibold text-foreground'>
+                          Histórico
+                        </th>
                         <th className='text-right py-3 px-4 font-semibold text-foreground'>
                           Tempo de Espera
                         </th>
@@ -1885,6 +1901,23 @@ const Admin = () => {
                                     -
                                   </span>
                                 )}
+                              </td>
+                              <td className='py-3 px-4 text-center'>
+                                <Button
+                                  variant='ghost'
+                                  size='sm'
+                                  className='h-8 w-8 p-0'
+                                  title='Ver histórico da senha'
+                                  onClick={() => {
+                                    setSelectedTicketForHistory({
+                                      id: ticket.id,
+                                      display_number: ticket.display_number,
+                                    });
+                                    setShowHistoryModal(true);
+                                  }}
+                                >
+                                  <History className='h-4 w-4 text-blue-500' />
+                                </Button>
                               </td>
                               <td className='py-3 px-4 text-right'>
                                 <span className='font-bold text-primary text-lg'>
@@ -2071,6 +2104,20 @@ const Admin = () => {
               <Button onClick={() => navigate('/users')}>
                 <Users className='mr-2 h-4 w-4' />
                 Gerenciar Usuários
+              </Button>
+            </Card>
+
+            <Card className='p-6 shadow-medium'>
+              <h2 className='mb-6 text-2xl font-bold text-foreground'>
+                Gerenciamento de Histórico de Senhas
+              </h2>
+              <p className='text-sm text-muted-foreground mb-4'>
+                Pesquise, visualize e exporte o histórico completo de todas as senhas do sistema. 
+                Filtre por data, paciente, médico, operador ou especialidade.
+              </p>
+              <Button onClick={() => setShowHistoryManagement(true)}>
+                <History className='mr-2 h-4 w-4' />
+                Gerenciar Histórico de Senhas
               </Button>
             </Card>
           </TabsContent>
@@ -2347,6 +2394,25 @@ const Admin = () => {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        {/* Modal de Histórico da Senha */}
+        <TicketHistoryModal
+          open={showHistoryModal}
+          onOpenChange={(open) => {
+            setShowHistoryModal(open);
+            if (!open) {
+              setSelectedTicketForHistory(null);
+            }
+          }}
+          ticketId={selectedTicketForHistory?.id || ''}
+          displayNumber={selectedTicketForHistory?.display_number || ''}
+        />
+
+        {/* Modal de Gerenciamento de Histórico de Senhas */}
+        <TicketHistoryManagement
+          open={showHistoryManagement}
+          onOpenChange={setShowHistoryManagement}
+        />
       </div>
     </div>
   );
