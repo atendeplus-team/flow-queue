@@ -71,30 +71,136 @@ export const silentPrintTicket = async (
   try {
     const settings = await getPrinterSettings();
     
-    if (!settings?.print_server_url) {
-      console.warn('Servidor de impressão não configurado.');
+    // Se houver servidor remoto configurado, envia para lá
+    if (settings?.print_server_url) {
+      if (!settings.printer_ip) {
+        console.error('printer_ip não configurado nas company_settings');
+        return false;
+      }
+
+      const printerPort = settings.printer_port || 9100;
+      const escpos = buildEscPos(ticket, queue);
+      const data = Array.from(escpos);
+      const payload = { data, printer_ip: settings.printer_ip, printer_port: printerPort };
+
+      // Se estiver em HTTPS e o print_server_url for HTTP, faz fallback para Edge Function (HTTPS)
+      if (
+        typeof window !== 'undefined' &&
+        window.location?.protocol === 'https:' &&
+        settings.print_server_url.startsWith('http:')
+      ) {
+        try {
+          const { data: fnData, error } = await (supabase as any).functions.invoke('print-ticket', {
+            body: payload,
+          });
+          if (error || !fnData?.success) {
+            console.error('Falha na função print-ticket:', error || fnData);
+            return false;
+          }
+          console.log('Ticket impresso via Edge Function (HTTPS)');
+          return true;
+        } catch (err) {
+          console.error('Erro ao chamar função print-ticket:', err);
+          return false;
+        }
+      }
+
+      // Caso normal: chama o servidor de impressão diretamente
+      try {
+        const response = await fetch(`${settings.print_server_url}/print`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error('Erro ao imprimir no servidor remoto:', response.status, errorText);
+          return false;
+        }
+
+        console.log('Ticket impresso com sucesso no servidor remoto');
+        return true;
+      } catch (err) {
+        console.error('Erro de rede ao chamar servidor de impressão:', err);
+        return false;
+      }
+    }
+
+    // Fallback: Impressão local no Windows (quando sem servidor remoto)
+    const pt = new Intl.DateTimeFormat('pt-BR', {
+      dateStyle: 'short',
+      timeStyle: 'short',
+    }).format(new Date(ticket.created_at));
+
+    const getPriorityLabel = (priority: string) => {
+      const labels: Record<string, string> = {
+        normal: 'Normal',
+        elderly: 'Idoso',
+        pregnant: 'Gestante',
+        disabled: 'PcD',
+      };
+      return labels[priority] || priority;
+    };
+
+    // Cria uma janela oculta para impressão
+    const printWindow = window.open('', '_blank', 'width=300,height=400');
+    if (!printWindow) {
+      console.error('Não foi possível abrir janela de impressão');
       return false;
     }
 
-    const escposData = buildEscPos(ticket, queue);
-    
-    // Envia apenas os dados ESC/POS - backend busca IP/porta do Supabase
-    const response = await fetch(`${settings.print_server_url}/print`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        data: Array.from(escposData),
-      }),
-    });
+    printWindow.document.write(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <title>Impressão Senha</title>
+        <style>
+          @page {
+            size: 80mm auto;
+            margin: 0;
+          }
+          body {
+            font-family: 'Courier New', monospace;
+            text-align: center;
+            padding: 10px;
+            margin: 0;
+          }
+          .queue-name {
+            font-size: 14px;
+            font-weight: bold;
+            margin-bottom: 10px;
+          }
+          .ticket-number {
+            font-size: 48px;
+            font-weight: bold;
+            margin: 20px 0;
+          }
+          .info {
+            font-size: 12px;
+            margin: 5px 0;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="queue-name">${queue.name}</div>
+        <div class="ticket-number">${ticket.display_number}</div>
+        <div class="info">${pt}</div>
+        <div class="info">${getPriorityLabel(ticket.priority)}</div>
+      </body>
+      </html>
+    `);
 
-    const data = await response.json();
+    printWindow.document.close();
     
-    if (!response.ok || !data.success) {
-      console.error('Erro ao enviar impressão:', data.error);
-      return false;
-    }
+    // Aguarda o carregamento e imprime
+    setTimeout(() => {
+      printWindow.print();
+      setTimeout(() => {
+        printWindow.close();
+      }, 500);
+    }, 250);
 
     return true;
   } catch (e) {

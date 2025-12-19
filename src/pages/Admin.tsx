@@ -505,6 +505,21 @@ const Admin = () => {
 
   const testPrinter = async () => {
     try {
+      // Bloqueia Mixed Content: front em HTTPS e print_server HTTP
+      if (
+        typeof window !== 'undefined' &&
+        window.location?.protocol === 'https:' &&
+        printServerUrl?.startsWith('http:')
+      ) {
+        toast({
+          title: 'Conflito de protocolo (HTTPS vs HTTP)',
+          description:
+            'O app está em HTTPS e o servidor de impressão em HTTP. Use HTTPS no servidor (proxy) ou acesse o app por HTTP na rede interna.',
+          variant: 'destructive',
+        });
+        return;
+      }
+
       if (!printServerUrl || !printerIp) {
         toast({
           title: 'Configuração incompleta',

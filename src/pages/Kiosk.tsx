@@ -76,22 +76,41 @@ const Kiosk = () => {
         .order('name');
 
       if (error) throw error;
-      setQueues(
-        (data || []).map((q: any) => ({
-          id: q.id,
-          name: q.name,
-          code: q.code,
-          description: q.description,
-          preferential:
-            q.preferential === '1' ||
-            q.preferential === "B'1'" ||
-            q.preferential === 1 ||
-            q.preferential === true ||
-            q.preferential === '\\x01'
-              ? '1'
-              : '0',
-        }))
-      );
+      
+      const mappedQueues = (data || []).map((q: any) => ({
+        id: q.id,
+        name: q.name,
+        code: q.code,
+        description: q.description,
+        preferential:
+          q.preferential === '1' ||
+          q.preferential === "B'1'" ||
+          q.preferential === 1 ||
+          q.preferential === true ||
+          q.preferential === '\\x01'
+            ? '1'
+            : '0',
+      }));
+
+      // Ordena: primeiro o primeiro normal, depois o primeiro preferencial, depois o resto
+      const normalQueues = mappedQueues.filter((q) => q.preferential === '0');
+      const preferentialQueues = mappedQueues.filter((q) => q.preferential === '1');
+      
+      const orderedQueues = [];
+      if (normalQueues.length > 0) orderedQueues.push(normalQueues[0]); // Primeiro normal
+      if (preferentialQueues.length > 0) orderedQueues.push(preferentialQueues[0]); // Primeiro preferencial
+      
+      // Adiciona o resto dos normais
+      for (let i = 1; i < normalQueues.length; i++) {
+        orderedQueues.push(normalQueues[i]);
+      }
+      
+      // Adiciona o resto dos preferenciais
+      for (let i = 1; i < preferentialQueues.length; i++) {
+        orderedQueues.push(preferentialQueues[i]);
+      }
+      
+      setQueues(orderedQueues);
     } catch (error) {
       toast({
         title: 'Erro ao carregar filas',
@@ -135,14 +154,13 @@ const Kiosk = () => {
     );
   };
 
-  // Gera a senha escolhendo fila por prioridade e incrementando número do dia
-  const generateTicket = async (priority: string) => {
+  // Gera a senha para a fila selecionada pelo ID
+  const generateTicket = async (queueId: string) => {
     if (queues.length === 0) return;
 
-    const queue =
-      priority === 'priority'
-        ? queues.find((q) => isPreferentialQueue(q)) || queues[0]
-        : queues.find((q) => !isPreferentialQueue(q)) || queues[0];
+    const queue = queues.find((q) => q.id === queueId);
+    if (!queue) return;
+
     setGenerating(true);
     try {
       // Busca a última senha gerada para esta fila
@@ -181,7 +199,7 @@ const Kiosk = () => {
           ticket_number: nextNumber,
           prefix: queue.code,
           display_number: displayNumber,
-          priority: priority,
+          priority: queue.preferential === '1' ? 'priority' : 'normal',
           status: 'waiting',
         })
         .select()
@@ -249,11 +267,11 @@ const Kiosk = () => {
           </div>
         )}
 
-        <div className='mb-8 text-center'>
-          <h1 className='mb-2 text-4xl font-bold text-foreground md:text-5xl'>
+        <div className='mb-6 text-center'>
+          <h1 className='mb-2 text-3xl font-bold text-foreground md:text-4xl'>
             Retirar Senha
           </h1>
-          <p className='text-lg text-muted-foreground'>
+          <p className='text-base text-muted-foreground'>
             Selecione o tipo de atendimento
           </p>
         </div>
@@ -266,50 +284,47 @@ const Kiosk = () => {
           </Card>
         ) : (
           <div className='grid gap-6 md:grid-cols-2'>
-            <Card className='group relative overflow-hidden p-8 shadow-medium transition-all hover:shadow-large'>
-              <div className='absolute inset-0 bg-gradient-primary opacity-0 transition-opacity group-hover:opacity-5' />
+            {queues.map((queue, index) => (
+              <Card
+                key={queue.id}
+                className={`group relative overflow-hidden p-6 shadow-medium transition-all hover:shadow-large ${
+                  queues.length % 2 !== 0 && index === queues.length - 1
+                    ? 'md:col-span-2 md:mx-auto md:w-1/2'
+                    : ''
+                }`}
+              >
+                <div
+                  className={`absolute inset-0 ${
+                    queue.preferential === '1'
+                      ? 'bg-secondary'
+                      : 'bg-gradient-primary'
+                  } opacity-0 transition-opacity group-hover:opacity-5`}
+                />
 
-              <div className='relative'>
-                <h2 className='mb-6 text-center text-3xl font-bold text-foreground'>
-                  Senha Normal
-                </h2>
-                <Button
-                  size='lg'
-                  onClick={() => generateTicket('normal')}
-                  disabled={generating}
-                  className='w-full h-32 bg-gradient-primary text-2xl font-semibold'
-                >
-                  {generating ? (
-                    <Loader2 className='h-10 w-10 animate-spin' />
-                  ) : (
-                    'Retirar Senha Normal'
-                  )}
-                </Button>
-              </div>
-            </Card>
-
-            <Card className='group relative overflow-hidden p-8 shadow-medium transition-all hover:shadow-large'>
-              <div className='absolute inset-0 bg-secondary opacity-0 transition-opacity group-hover:opacity-5' />
-
-              <div className='relative'>
-                <h2 className='mb-6 text-center text-3xl font-bold text-foreground'>
-                  Senha Preferencial
-                </h2>
-                <Button
-                  size='lg'
-                  onClick={() => generateTicket('priority')}
-                  disabled={generating}
-                  variant='secondary'
-                  className='w-full h-32 text-2xl font-semibold'
-                >
-                  {generating ? (
-                    <Loader2 className='h-10 w-10 animate-spin' />
-                  ) : (
-                    'Retirar Senha Preferencial'
-                  )}
-                </Button>
-              </div>
-            </Card>
+                <div className='relative'>
+                  <h2 className='mb-4 text-center text-2xl font-bold text-foreground'>
+                    {queue.name}
+                  </h2>
+                  <Button
+                    size='lg'
+                    onClick={() => generateTicket(queue.id)}
+                    disabled={generating}
+                    variant={
+                      queue.preferential === '1' ? 'secondary' : 'default'
+                    }
+                    className={`w-full h-24 text-xl font-semibold ${
+                      queue.preferential !== '1' ? 'bg-gradient-primary' : ''
+                    }`}
+                  >
+                    {generating ? (
+                      <Loader2 className='h-8 w-8 animate-spin' />
+                    ) : (
+                      `Retirar Senha ${queue.code}`
+                    )}
+                  </Button>
+                </div>
+              </Card>
+            ))}
           </div>
         )}
       </div>

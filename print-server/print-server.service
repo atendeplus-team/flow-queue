@@ -1,0 +1,14 @@
+[Unit]
+Description=ESC/POS Print Server (HTTPS)
+After=network.target
+
+[Service]
+WorkingDirectory=/home/digi/print-server
+ExecStart=/usr/bin/node /home/digi/print-server/server.js
+Restart=always
+RestartSec=10
+User=digi
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
