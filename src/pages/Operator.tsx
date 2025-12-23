@@ -31,6 +31,7 @@ import {
   Send,
   XCircle,
   Home,
+  AlertTriangle,
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { useUserRole } from '@/hooks/useUserRole';
@@ -43,6 +44,9 @@ interface Ticket {
   status: string;
   created_at: string;
   queue_id: string;
+  ticket_number?: string | number;
+  urgent?: number;
+  urgent_date?: string;
 }
 
 const Operator = () => {
@@ -56,6 +60,8 @@ const Operator = () => {
   const [callCount, setCallCount] = useState(0);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [restoringCurrent, setRestoringCurrent] = useState(false);
+  const loadingRef = undefined;
+  const lastLoadRef = undefined;
   const [authChecked, setAuthChecked] = useState(false);
   const [showFinishDialog, setShowFinishDialog] = useState(false);
   const [patientName, setPatientName] = useState('');
@@ -248,6 +254,77 @@ const Operator = () => {
     const timeout = setTimeout(() => controller.abort(), 10000);
 
     try {
+      // Busca configuração de chamadas para decidir comportamento
+      const { data: settings } = await supabase
+        .from('company_settings')
+        .select('password_setting')
+        .limit(1)
+        .single();
+
+      const passwordSetting = settings?.password_setting || 1;
+
+      // Se modo Ordem de Chegada, buscamos tickets por created_at (mais antigo primeiro)
+      if (Number(passwordSetting) === 2) {
+        try {
+          const nowDate = new Date();
+          const startOfDay = new Date(
+            Date.UTC(
+              nowDate.getUTCFullYear(),
+              nowDate.getUTCMonth(),
+              nowDate.getUTCDate(),
+              0,
+              0,
+              0
+            )
+          );
+          const startOfDayISO = startOfDay.toISOString();
+
+          // Buscar tickets para ordenar por ordem de chegada (por created_at)
+          const { data: rows, error } = await supabase
+            .from('tickets')
+            .select('id, display_number, priority, queue_id, created_at, ticket_number, urgent, urgent_date')
+            .is('finished_at', null)
+            .eq('in_service', false)
+            .gte('created_at', startOfDayISO)
+            .limit(500);
+
+          if (error) throw error;
+
+          const items = (rows || []) as any[];
+          const mapped = items
+            .map((d) => ({
+              id: d.id,
+              display_number: d.display_number,
+              priority: d.priority,
+              queue_id: d.queue_id,
+              created_at: d.created_at,
+              ticket_number: d.ticket_number,
+              urgent: d.urgent || 0,
+              urgent_date: d.urgent_date || null,
+              status: 'waiting',
+            }))
+            // Ordena: urgentes primeiro (por urgent_date asc), depois por created_at asc
+            .sort((a: any, b: any) => {
+              if ((a.urgent || 0) !== (b.urgent || 0)) return (b.urgent || 0) - (a.urgent || 0);
+              if (a.urgent && b.urgent) {
+                return new Date(a.urgent_date || 0).getTime() - new Date(b.urgent_date || 0).getTime();
+              }
+              return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+            });
+          setTickets(mapped as any);
+          setWaitPage(0);
+          return;
+        } catch (e: any) {
+          toast({
+            title: 'Erro ao carregar senhas',
+            description: e.message || String(e),
+            variant: 'destructive',
+          });
+          return;
+        }
+      }
+
+      // Padrão: usar preview com lógica 2 para 1 (ou o que a função edge retornar)
       const { data, error } = await supabase.functions.invoke('queue-preview', {
         body: {},
         signal: controller.signal,
@@ -264,15 +341,58 @@ const Operator = () => {
 
       const items = (data as any)?.items as any[] | undefined;
       if (items && Array.isArray(items)) {
-        const mapped = items.map((d) => ({
+        const prev = tickets || [];
+        const ids = items.map((d: any) => d.id).filter(Boolean);
+        let urgentInfo: Array<{ id: string; urgent: number; urgent_date: string | null }> = [];
+        try {
+          // @ts-ignore
+          const { data: ui } = await (supabase as any)
+            .from('tickets')
+            .select('id, urgent, urgent_date')
+            .in('id', ids || []);
+          urgentInfo = ui || [];
+        } catch (e) {
+          urgentInfo = [];
+        }
+        const urgentMap: Record<string, any> = {};
+        urgentInfo.forEach((u: any) => (urgentMap[u.id] = u));
+
+        const originalIndexMap: Record<string, number> = {};
+        items.forEach((it: any, idx: number) => { if (it && it.id) originalIndexMap[it.id] = idx; });
+
+        const mapped = items.map((d: any, idx: number) => ({
           id: d.id,
           display_number: d.display_number,
           priority: d.priority,
           queue_id: d.queue_id,
           created_at: d.created_at,
           status: 'waiting',
+          urgent: typeof d.urgent !== 'undefined' ? d.urgent : (urgentMap[d.id]?.urgent ?? (prev.find((p:any)=>p.id===d.id)?.urgent || 0)),
+          urgent_date: typeof d.urgent_date !== 'undefined' ? d.urgent_date : (urgentMap[d.id]?.urgent_date ?? (prev.find((p:any)=>p.id===d.id)?.urgent_date || null)),
+          __original_index: idx,
         }));
-        setTickets(mapped as any);
+
+        // Separar urgentes e não-urgentes
+        const urgentList = mapped.filter((m: any) => m.urgent).sort((a: any, b: any) => new Date(a.urgent_date || 0).getTime() - new Date(b.urgent_date || 0).getTime());
+        let nonUrgentList = mapped.filter((m: any) => !m.urgent);
+
+        // Se o modo atual é Ordem de Chegada (2), ordenar não-urgentes por created_at
+        if (Number(passwordSetting) === 2) {
+          nonUrgentList = nonUrgentList.sort((a: any, b: any) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+        } else {
+          // Modo 2-para-1: preservar ordem original fornecida pela edge function
+          nonUrgentList = nonUrgentList.sort((a: any, b: any) => (originalIndexMap[a.id] || 0) - (originalIndexMap[b.id] || 0));
+        }
+
+        const finalList = [...urgentList, ...nonUrgentList];
+        // Debug: inspeciona dados recebidos e merge realizado
+        // eslint-disable-next-line no-console
+        console.log('queue-preview items:', items);
+        // eslint-disable-next-line no-console
+        console.log('tickets urgentMap:', urgentMap);
+        // eslint-disable-next-line no-console
+        console.log('tickets finalList after merge:', finalList);
+        setTickets(finalList as any);
         setWaitPage((prev) => {
           const maxPage = Math.max(
             0,
@@ -287,34 +407,191 @@ const Operator = () => {
   };
 
   const callNextTicket = async () => {
-    // Adiciona timeout de 10s para evitar travamento
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
 
     try {
-      const { data, error } = await supabase.functions.invoke('call-next', {
-        body: { operator_name: operatorName, counter },
-        signal: controller.signal,
-      });
+        // PRIORIDADE: se existir alguma senha urgente aguardando, chamar ela primeiro
+        try {
+          // @ts-ignore
+          const { data: urgentRows, error: urgentError } = await (supabase as any)
+            .from('tickets')
+            .select('id, display_number, priority, created_at, urgent, urgent_date')
+            .eq('status', 'waiting')
+            .is('in_service', false)
+            .is('finished_at', null)
+            .eq('urgent', 1)
+            .order('urgent_date', { ascending: true })
+            .order('created_at', { ascending: true })
+            .limit(1);
 
-      if (error) {
+          if (!urgentError && urgentRows && urgentRows.length > 0) {
+            const urgentTicket = urgentRows[0] as any;
+            const nowUrg = new Date().toISOString();
+            // @ts-ignore
+            const { data: calledData, error: callError } = await (supabase as any)
+              .from('tickets')
+              .update({
+                status: 'called',
+                called_at: nowUrg,
+                operator_name: operatorName,
+                counter,
+                in_service: true,
+              })
+              .eq('id', urgentTicket.id)
+              .eq('status', 'waiting')
+              .is('in_service', false)
+              .select('*')
+              .single();
+
+            if (!callError && calledData) {
+              const newCallCount = callCount + 1;
+              setCallCount(newCallCount);
+              localStorage.setItem('callCount', newCallCount.toString());
+              setCurrentTicket(calledData as Ticket);
+              localStorage.setItem('currentTicketId', calledData.id);
+              toast({
+                title: 'Senha urgente chamada',
+                description: `Senha ${calledData.display_number} (urgente) chamada!`,
+              });
+              loadWaitingTickets();
+              clearTimeout(timeout);
+              return;
+            }
+          }
+        } catch (e) {
+          console.warn('Erro ao priorizar urgentes:', e);
+        }
+
+      // Buscar configuração (1 = padrão, 2 = ordem de chegada)
+      let passwordSetting = 1;
+      try {
+        const { data: settings } = await supabase
+          .from('company_settings')
+          .select('password_setting')
+          .limit(1)
+          .single();
+        passwordSetting = settings?.password_setting || 1;
+      } catch (e) {
+        console.warn('Falha ao ler company_settings, usando padrão', e);
+      }
+
+      // Se modo padrão (1) -> usar edge function existente
+      if (Number(passwordSetting) === 1) {
+        const { data, error } = await supabase.functions.invoke('call-next', {
+          body: { operator_name: operatorName, counter },
+          signal: controller.signal,
+        });
+
+        if (error) {
+          toast({
+            title: 'Erro ao chamar senha',
+            description: error.message,
+            variant: 'destructive',
+          });
+          return;
+        }
+
+        const nextTicket = (data as any)?.next as Ticket | null;
+        if (!nextTicket) {
+          toast({
+            title: 'Nenhuma senha disponível',
+            description: 'Não há senhas aguardando no momento.',
+          });
+          return;
+        }
+
+        const newCallCount = callCount + 1;
+        setCallCount(newCallCount);
+        localStorage.setItem('callCount', newCallCount.toString());
+
+        setCurrentTicket(nextTicket);
+        localStorage.setItem('currentTicketId', nextTicket.id);
         toast({
-          title: 'Erro ao chamar senha',
-          description: error.message,
+          title: 'Senha chamada',
+          description: `Senha ${nextTicket.display_number} foi chamada!`,
+        });
+        loadWaitingTickets();
+        return;
+      }
+
+      // Se modo = 2 (ordem de chegada): chamar próxima senha criada após a atual
+      // Determinar created_at atual (timestamp)
+      const currentTs = currentTicket ? new Date(currentTicket.created_at).getTime() : null;
+
+      // Buscar tickets aguardando e filtrar/ordenar por created_at
+      // @ts-ignore
+      const { data: rows, error: rowsError } = await (supabase as any)
+        .from('tickets')
+        .select('id, display_number, priority, queue_id, created_at, ticket_number')
+        .eq('status', 'waiting')
+        .is('in_service', false)
+        .is('finished_at', null)
+        .limit(500);
+
+      if (rowsError) {
+        toast({
+          title: 'Erro ao buscar senhas',
+          description: rowsError.message || String(rowsError),
           variant: 'destructive',
         });
         return;
       }
 
-      const nextTicket = (data as any)?.next as Ticket | null;
-      if (!nextTicket) {
+      const items = (rows || []) as any[];
+      const mapped = items
+        .map((d) => ({
+          id: d.id,
+          display_number: d.display_number,
+          priority: d.priority,
+          queue_id: d.queue_id,
+          created_at: d.created_at,
+          created_ts: new Date(d.created_at).getTime(),
+          ticket_number: d.ticket_number,
+        }))
+        .sort((a, b) => a.created_ts - b.created_ts);
+
+      // Seleciona candidatos:
+      const candidates = currentTs
+        ? mapped.filter((it) => it.created_ts > currentTs)
+        : mapped;
+
+      if (!candidates || candidates.length === 0) {
         toast({
           title: 'Nenhuma senha disponível',
-          description: 'Não há senhas aguardando no momento.',
+          description: 'Não há senhas disponíveis após a atual.',
         });
         return;
       }
 
+      const toCall = candidates[0];
+      const now = new Date().toISOString();
+      // @ts-ignore
+      const { data: calledData, error: callError } = await (supabase as any)
+        .from('tickets')
+        .update({
+          status: 'called',
+          called_at: now,
+          operator_name: operatorName,
+          counter,
+          in_service: true,
+        })
+        .eq('id', toCall.id)
+        .eq('status', 'waiting')
+        .is('in_service', false)
+        .select('*')
+        .single();
+
+      if (callError) {
+        toast({
+          title: 'Erro ao chamar senha',
+          description: callError.message || String(callError),
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      const nextTicket = calledData as Ticket;
       const newCallCount = callCount + 1;
       setCallCount(newCallCount);
       localStorage.setItem('callCount', newCallCount.toString());
@@ -452,6 +729,8 @@ const Operator = () => {
           doctor_name: selectedDoctorName,
           doctor_id: selectedDoctorId,
           counter: selectedDoctorConsultorio || counter,
+          urgent: (currentTicket as any).urgent || 0,
+          urgent_date: (currentTicket as any).urgent_date || null,
           in_service: false,
           finished_at: null,
           called_at: null,
@@ -466,6 +745,8 @@ const Operator = () => {
           priority: currentTicket.priority,
           status: 'waiting',
           operator_name: operatorName,
+          urgent: (currentTicket as any).urgent || 0,
+          urgent_date: (currentTicket as any).urgent_date || null,
           counter: counter,
           in_service: false,
           finished_at: null,
@@ -486,6 +767,8 @@ const Operator = () => {
           priority: currentTicket.priority,
           status: 'waiting',
           operator_name: operatorName,
+          urgent: (currentTicket as any).urgent || 0,
+          urgent_date: (currentTicket as any).urgent_date || null,
           counter: counter,
           in_service: false,
           finished_at: null,
@@ -681,19 +964,64 @@ const Operator = () => {
                   .map((ticket, index) => (
                     <div
                       key={ticket.id}
-                      className='flex items-center justify-between rounded-lg bg-muted p-3'
+                        className={`flex items-center justify-between rounded-lg p-3 ${ticket.urgent ? 'bg-red-50' : 'bg-muted'}`}
                     >
                       <div className='flex items-center gap-3'>
                         <span className='flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground'>
                           {index + 1 + waitPage * PAGE_SIZE}
                         </span>
-                        <span className='font-semibold text-foreground'>
-                          {ticket.display_number}
-                        </span>
+                          <span className={`font-semibold ${ticket.urgent ? 'text-red-600' : 'text-foreground'}`}>
+                            {ticket.display_number}
+                          </span>
                       </div>
-                      {ticket.priority !== 'normal' && (
-                        <Badge variant='secondary'>Preferencial</Badge>
-                      )}
+                        <div className='flex items-center gap-2'>
+                          {ticket.priority !== 'normal' && (
+                            <Badge variant='secondary'>Preferencial</Badge>
+                          )}
+                          <Button
+                            size='sm'
+                            variant={ticket.urgent ? 'destructive' : 'outline'}
+                            className={`${ticket.urgent ? 'bg-red-600 text-white hover:bg-red-700' : 'hover:bg-red-600 hover:text-white hover:border-red-600'} ${ticket.urgent ? 'text-xs px-2 py-1 h-8' : 'px-3 py-1'}`}
+                            onClick={async () => {
+                              try {
+                                const newUrgent = ticket.urgent ? 0 : 1;
+                                const urgentDate = newUrgent ? new Date().toISOString() : null;
+                                // Atualiza ticket
+                                const { error: updateError } = await (supabase as any)
+                                  .from('tickets')
+                                  .update({ urgent: newUrgent, urgent_date: urgentDate })
+                                  .eq('id', ticket.id);
+                                if (updateError) throw updateError;
+
+                                // Insere no histórico
+                                const { error: histErr } = await (supabase as any)
+                                  .from('ticket_history')
+                                  .insert({
+                                    ticket_id: ticket.id,
+                                    display_number: ticket.display_number,
+                                    event_type: newUrgent ? 'marcado_urgente' : 'retirado_urgente',
+                                    event_description: newUrgent ? 'Senha marcada como urgente' : 'Urgência retirada da senha',
+                                    urgent: newUrgent,
+                                    urgent_date: urgentDate,
+                                    created_at: new Date().toISOString(),
+                                  });
+                                if (histErr) throw histErr;
+
+                                // Atualiza estado local (refetch simples)
+                                loadWaitingTickets();
+                                toast({
+                                  title: newUrgent ? 'Senha marcada como urgente' : 'Urgência removida',
+                                  description: `Senha ${ticket.display_number}`,
+                                });
+                              } catch (err: any) {
+                                console.error('Erro ao alternar urgente:', err);
+                                toast({ title: 'Erro', description: err.message || String(err), variant: 'destructive' });
+                              }
+                            }}
+                          >
+                            {ticket.urgent ? <span className='text-xs'>Retirar Urgente</span> : 'Urgente'}
+                          </Button>
+                        </div>
                     </div>
                   ))}
               </div>

@@ -36,6 +36,19 @@ serve(async (req: Request) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     );
 
+    // Buscar configuração de chamada de senhas
+    const { data: settings } = await supabase
+      .from('company_settings')
+      .select('password_setting')
+      .limit(1)
+      .single();
+    
+    // 1 = Modo 2 para 1 (intercala normal/preferencial)
+    // 2 = Modo Ordem de Chegada (sequencial por created_at)
+    const passwordSetting = settings?.password_setting || 1;
+
+    console.log('[call-next] Modo de chamada:', passwordSetting === 1 ? '2 para 1' : 'Ordem de Chegada');
+
     // 1) Buscar estado atual e últimos atendidos do dia (apenas tickets)
     const nowDate = new Date();
     const startOfDay = new Date(
@@ -59,36 +72,6 @@ serve(async (req: Request) => {
       .limit(1)
       .maybeSingle();
 
-    // Cache TTL 1000ms para contagem de normais consecutivos
-    let normalsSinceLastPrefFinished: number;
-    if (Date.now() - countCache.ts < 1000) {
-      normalsSinceLastPrefFinished = countCache.normalsAfterLastPref;
-    } else {
-      // Último preferencial finalizado hoje
-      const { data: lastPref } = await supabase
-        .from('tickets')
-        .select('finished_at')
-        .not('finished_at', 'is', null)
-        .gte('finished_at', startOfDayISO)
-        .neq('priority', 'normal')
-        .order('finished_at', { ascending: false })
-        .limit(1);
-      const baseTime =
-        lastPref && lastPref.length ? lastPref[0].finished_at : startOfDayISO;
-      // Conta normais finalizados após último preferencial
-      const { count: normalsCount } = await supabase
-        .from('tickets')
-        .select('id', { count: 'exact', head: true })
-        .not('finished_at', 'is', null)
-        .gt('finished_at', baseTime)
-        .eq('priority', 'normal');
-      normalsSinceLastPrefFinished = normalsCount || 0;
-      countCache = {
-        ts: Date.now(),
-        normalsAfterLastPref: normalsSinceLastPrefFinished,
-      };
-    }
-
     // Se já existe um ticket em atendimento, não avançar a fila;
     // apenas retornar o ticket atual para evitar quebrar a sequência.
     if (current) {
@@ -106,43 +89,91 @@ serve(async (req: Request) => {
       );
     }
 
-    const currentIsNormal = current ? current.priority === 'normal' : false;
-    const futureNormals =
-      normalsSinceLastPrefFinished + (currentIsNormal ? 1 : 0);
-    const nextType: 'normal' | 'preferencial' =
-      futureNormals >= 2 ? 'preferencial' : 'normal';
+    let next: Ticket | undefined;
 
-    // 3) Buscar próximas senhas aguardando por tipo (apenas criadas hoje)
-    const [{ data: normals }, { data: prefs }] = (await Promise.all([
-      supabase
+    // MODO 2: Ordem de Chegada - busca o próximo ticket independente do tipo
+    if (passwordSetting === 2) {
+      const { data: allTickets } = await supabase
         .from('tickets')
         .select('id, display_number, priority, queue_id, created_at')
         .is('finished_at', null)
         .eq('in_service', false)
-        .eq('priority', 'normal')
         .gte('created_at', startOfDayISO)
         .order('created_at', { ascending: true })
-        .limit(10),
-      supabase
-        .from('tickets')
-        .select('id, display_number, priority, queue_id, created_at')
-        .is('finished_at', null)
-        .eq('in_service', false)
-        .neq('priority', 'normal')
-        .gte('created_at', startOfDayISO)
-        .order('created_at', { ascending: true })
-        .limit(10),
-    ])) as any;
+        .limit(1);
 
-    const pick = (
-      nextType === 'normal' ? (normals || [])[0] : (prefs || [])[0]
-    ) as Ticket | undefined;
+      next = (allTickets || [])[0] as Ticket | undefined;
+    } 
+    // MODO 1: 2 para 1 - intercala normal/preferencial
+    else {
+      // Cache TTL 1000ms para contagem de normais consecutivos
+      let normalsSinceLastPrefFinished: number;
+      if (Date.now() - countCache.ts < 1000) {
+        normalsSinceLastPrefFinished = countCache.normalsAfterLastPref;
+      } else {
+        // Último preferencial finalizado hoje
+        const { data: lastPref } = await supabase
+          .from('tickets')
+          .select('finished_at')
+          .not('finished_at', 'is', null)
+          .gte('finished_at', startOfDayISO)
+          .neq('priority', 'normal')
+          .order('finished_at', { ascending: false })
+          .limit(1);
+        const baseTime =
+          lastPref && lastPref.length ? lastPref[0].finished_at : startOfDayISO;
+        // Conta normais finalizados após último preferencial
+        const { count: normalsCount } = await supabase
+          .from('tickets')
+          .select('id', { count: 'exact', head: true })
+          .not('finished_at', 'is', null)
+          .gt('finished_at', baseTime)
+          .eq('priority', 'normal');
+        normalsSinceLastPrefFinished = normalsCount || 0;
+        countCache = {
+          ts: Date.now(),
+          normalsAfterLastPref: normalsSinceLastPrefFinished,
+        };
+      }
 
-    // fallback quando não há do tipo esperado
-    let next: Ticket | undefined = pick;
-    if (!next) {
-      const alt = nextType === 'normal' ? (prefs || [])[0] : (normals || [])[0];
-      next = alt as Ticket | undefined;
+      const currentIsNormal = current ? current.priority === 'normal' : false;
+      const futureNormals =
+        normalsSinceLastPrefFinished + (currentIsNormal ? 1 : 0);
+      const nextType: 'normal' | 'preferencial' =
+        futureNormals >= 2 ? 'preferencial' : 'normal';
+
+      // Buscar próximas senhas aguardando por tipo (apenas criadas hoje)
+      const [{ data: normals }, { data: prefs }] = (await Promise.all([
+        supabase
+          .from('tickets')
+          .select('id, display_number, priority, queue_id, created_at')
+          .is('finished_at', null)
+          .eq('in_service', false)
+          .eq('priority', 'normal')
+          .gte('created_at', startOfDayISO)
+          .order('created_at', { ascending: true })
+          .limit(10),
+        supabase
+          .from('tickets')
+          .select('id, display_number, priority, queue_id, created_at')
+          .is('finished_at', null)
+          .eq('in_service', false)
+          .neq('priority', 'normal')
+          .gte('created_at', startOfDayISO)
+          .order('created_at', { ascending: true })
+          .limit(10),
+      ])) as any;
+
+      const pick = (
+        nextType === 'normal' ? (normals || [])[0] : (prefs || [])[0]
+      ) as Ticket | undefined;
+
+      // fallback quando não há do tipo esperado
+      next = pick;
+      if (!next) {
+        const alt = nextType === 'normal' ? (prefs || [])[0] : (normals || [])[0];
+        next = alt as Ticket | undefined;
+      }
     }
 
     if (!next) {

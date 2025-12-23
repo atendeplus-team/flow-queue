@@ -128,13 +128,42 @@ serve(async (req: Request) => {
     const offset = futureNormals >= 2 ? 2 : futureNormals === 1 ? 1 : 0;
     const previewLimit = 50;
 
-    // NOVO: médico vê fila estritamente na ordem de chegada (created_at asc)
-    // Sem reordenação cíclica N,N,P. Prioridade é exibida, mas não muda posição.
+    // Primeiro: verificar se há tickets marcados como urgente para este médico
+    const { data: urgentWaiting, error: urgentErr } = await supabase
+      .from('doctor_tickets')
+      .select('id, display_number, priority, patient_name, created_at, urgent, urgent_date')
+      .eq(doctor_id ? 'doctor_id' : 'doctor_name', doctor_id ?? doctor_name)
+      .is('finished_at', null)
+      .eq('in_service', false)
+      .eq('urgent', 1)
+      .gte('created_at', startOfDayISO)
+      .order('urgent_date', { ascending: true })
+      .order('created_at', { ascending: true })
+      .limit(previewLimit);
+
+    if (urgentErr) console.error('[doctor-queue-preview] urgent fetch error:', urgentErr);
+
+    if (urgentWaiting && urgentWaiting.length > 0) {
+      const result: (DocTicket & { pos: number })[] = (urgentWaiting || []).map((t, idx) => ({ ...(t as DocTicket), pos: idx + 1 }));
+      return new Response(JSON.stringify({ success: true, items: result }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        status: 200,
+      });
+    }
+
+    // Se não houver urgente, ler configuração de senha (2 para 1 ou ordem de chegada)
+    const { data: settingRows } = await supabase
+      .from('company_settings')
+      .select('password_setting')
+      .limit(1)
+      .single();
+
+    const passwordSetting = settingRows?.password_setting || 1;
+
+    // Buscar lista de aguardando (ordenada por created_at)
     const { data: waiting, error: waitingError } = await supabase
       .from('doctor_tickets')
-      .select(
-        'id, display_number, priority, patient_name, created_at, in_service, finished_at'
-      )
+      .select('id, display_number, priority, patient_name, created_at, in_service, finished_at')
       .eq(doctor_id ? 'doctor_id' : 'doctor_name', doctor_id ?? doctor_name)
       .is('finished_at', null)
       .eq('in_service', false)
@@ -144,11 +173,38 @@ serve(async (req: Request) => {
 
     if (waitingError) throw waitingError;
 
-    const result: (DocTicket & { pos: number })[] = (waiting || []).map(
-      (t, idx) => ({ ...(t as DocTicket), pos: idx + 1 })
-    );
+    let resultItems: (DocTicket & { pos: number })[] = [];
 
-    const responsePayload = { success: true, items: result };
+    if (passwordSetting && Number(passwordSetting) === 2) {
+      // Aplicar lógica local N,N,P (2 normais, 1 preferencial)
+      const normals: any[] = [];
+      const prefs: any[] = [];
+      (waiting || []).forEach((t: any) => {
+        if (t.priority === 'normal') normals.push(t);
+        else prefs.push(t);
+      });
+
+      const reordered: any[] = [];
+      let nCount = 0;
+      while (normals.length || prefs.length) {
+        if (nCount < 2 && normals.length) {
+          reordered.push(normals.shift());
+          nCount++;
+        } else if (prefs.length) {
+          reordered.push(prefs.shift());
+          nCount = 0;
+        } else if (normals.length) {
+          reordered.push(normals.shift());
+          nCount++;
+        } else break;
+      }
+
+      resultItems = reordered.map((t: any, idx: number) => ({ ...(t as DocTicket), pos: idx + 1 }));
+    } else {
+      resultItems = (waiting || []).map((t: any, idx: number) => ({ ...(t as DocTicket), pos: idx + 1 }));
+    }
+
+    const responsePayload = { success: true, items: resultItems };
     // REMOVIDO: Cache para garantir dados sempre atualizados
     // previewCache = { ts: Date.now(), payload: responsePayload };
 

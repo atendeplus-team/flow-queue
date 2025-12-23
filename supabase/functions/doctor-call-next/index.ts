@@ -96,7 +96,74 @@ serve(async (req: Request) => {
       );
     }
 
-    // 2) FIFO: pegar o primeiro aguardando (apenas criadas hoje)
+    // 2) Ler modo de senha (2 = Ordem de Chegada) para decidir política de priorização
+    const { data: settingRows } = await supabase
+      .from('company_settings')
+      .select('password_setting')
+      .limit(1)
+      .single();
+
+    const passwordSetting = settingRows?.password_setting || 1;
+
+    // Se não estivermos em Ordem de Chegada (modo 2), priorizar urgentes globalmente como antes
+    if (!passwordSetting || Number(passwordSetting) !== 2) {
+      const { data: urgentWaiting, error: urgentErr } = await baseFilter(
+        supabase
+          .from('doctor_tickets')
+          .select('id, display_number, priority, patient_name, created_at, urgent, urgent_date')
+          .is('finished_at', null)
+          .eq('in_service', false)
+          .eq('urgent', 1)
+          .gte('created_at', startOfDayISO)
+          .order('urgent_date', { ascending: true })
+          .order('created_at', { ascending: true })
+          .limit(1)
+      );
+
+      if (urgentErr) {
+        console.error('[doctor-call-next] Urgent fetch error:', urgentErr);
+      }
+
+      if (urgentWaiting && urgentWaiting.length > 0) {
+        const urg = urgentWaiting[0] as DocTicket & { urgent?: number; urgent_date?: string };
+        // Chamar este urgente
+        const now = new Date().toISOString();
+        const updatePayloadUrg: Record<string, any> = {
+          status: 'Aguardando',
+          called_at: now,
+          in_service: false,
+          counter,
+        };
+        if (doctor_name) updatePayloadUrg.doctor_name = doctor_name;
+        if (doctor_id) updatePayloadUrg.doctor_id = doctor_id;
+
+        const { error: upUrgErr } = await supabase
+          .from('doctor_tickets')
+          .update(updatePayloadUrg)
+          .eq('id', urg.id);
+
+        if (upUrgErr) {
+          console.error('[doctor-call-next] Update urgent error:', upUrgErr);
+          throw upUrgErr;
+        }
+
+        const updatedTicket = { ...urg, ...updatePayloadUrg };
+        return new Response(JSON.stringify({ success: true, next: updatedTicket }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          status: 200,
+        });
+      }
+    }
+
+    // 3) Se não houver urgente (ou estamos em Ordem de Chegada), buscar lista de aguardando e aplicar regra de password_setting
+    const { data: settingRows } = await supabase
+      .from('company_settings')
+      .select('password_setting')
+      .limit(1)
+      .single();
+
+    const passwordSetting = settingRows?.password_setting || 1;
+
     const { data: waiting, error: waitErr } = await baseFilter(
       supabase
         .from('doctor_tickets')
@@ -105,7 +172,7 @@ serve(async (req: Request) => {
         .eq('in_service', false)
         .gte('created_at', startOfDayISO)
         .order('created_at', { ascending: true })
-        .limit(1)
+        .limit(200)
     );
 
     if (waitErr) {
@@ -113,7 +180,74 @@ serve(async (req: Request) => {
       throw waitErr;
     }
 
-    const next = (waiting && waiting[0]) as DocTicket | undefined;
+    let next = (waiting && waiting[0]) as DocTicket | undefined;
+
+    if (passwordSetting && Number(passwordSetting) === 2 && waiting && waiting.length) {
+      // Ordem de Chegada (modo 2): implementar regra numérica solicitada pelo usuário
+      // 1) buscar último normal finalizado por esse médico hoje (para saber o último número não-urgente chamado)
+      // Buscar o último normal chamado ou finalizado (usamos o evento mais recente entre called_at e finished_at)
+      const [{ data: lastByCalled }, { data: lastByFinished }] = await Promise.all([
+        baseFilter(
+          supabase
+            .from('doctor_tickets')
+            .select('display_number, called_at')
+            .not('called_at', 'is', null)
+            .eq('priority', 'normal')
+            .gte('called_at', startOfDayISO)
+            .order('called_at', { ascending: false })
+            .limit(1)
+        ),
+        baseFilter(
+          supabase
+            .from('doctor_tickets')
+            .select('display_number, finished_at')
+            .not('finished_at', 'is', null)
+            .eq('priority', 'normal')
+            .gte('finished_at', startOfDayISO)
+            .order('finished_at', { ascending: false })
+            .limit(1)
+        ),
+      ]);
+
+      const parseNum = (s: string | undefined) => {
+        if (!s) return null;
+        const m = s.match(/(\d+)/);
+        return m ? parseInt(m[1], 10) : null;
+      };
+
+      const calledRow = (lastByCalled && (lastByCalled as any)[0]) || null;
+      const finishedRow = (lastByFinished && (lastByFinished as any)[0]) || null;
+
+      let lastNormalNum = 0;
+      if (calledRow || finishedRow) {
+        const calledAt = calledRow ? new Date(calledRow.called_at).getTime() : 0;
+        const finishedAt = finishedRow ? new Date(finishedRow.finished_at).getTime() : 0;
+        const recent = calledAt >= finishedAt ? calledRow : finishedRow;
+        lastNormalNum = parseNum(recent?.display_number) || 0;
+      }
+
+      const nextNum = lastNormalNum + 1;
+
+      // mapear waiting com número extraído
+      const mapped = (waiting as any[]).map((t) => ({ ...(t as any), __num: parseNum((t as any).display_number) || 0 }));
+
+      // 2) se existir um urgente com número == nextNum, chamar ele
+      const urgentImmediate = mapped.find((m) => (m.urgent || 0) === 1 && m.__num === nextNum);
+      if (urgentImmediate) {
+        next = urgentImmediate as DocTicket;
+      } else {
+        // 3) caso contrário, escolher o próximo normal com número > lastNormalNum (menor número maior que lastNormalNum)
+        const normalsGreater = mapped
+          .filter((m) => (m.priority || 'normal') === 'normal' && m.__num > lastNormalNum)
+          .sort((a, b) => a.__num - b.__num);
+        if (normalsGreater && normalsGreater.length) {
+          next = normalsGreater[0] as DocTicket;
+        } else {
+          // fallback: primeira da lista (ordem por created_at)
+          next = (waiting && waiting[0]) as DocTicket | undefined;
+        }
+      }
+    }
 
     if (!next) {
       return new Response(

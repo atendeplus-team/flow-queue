@@ -17,10 +17,11 @@ interface Queue {
   preferential: string;
 }
 
-// Configurações de branding (logo/nome) usadas no kiosk
+// Configurações de branding (logo/nome) e modo de chamada usadas no kiosk
 interface CompanySettings {
   logo_url: string | null;
   company_name: string;
+  password_setting: number | null;
 }
 
 const Kiosk = () => {
@@ -122,11 +123,11 @@ const Kiosk = () => {
     }
   };
 
-  // Carrega logo e nome da empresa para exibição
+  // Carrega logo, nome da empresa e configuração de chamada de senhas para exibição
   const loadCompanySettings = async () => {
-    const { data } = await supabase
+    const { data } = await (supabase as any)
       .from('company_settings')
-      .select('*')
+      .select('logo_url, company_name, password_setting')
       .limit(1)
       .single();
 
@@ -163,27 +164,53 @@ const Kiosk = () => {
 
     setGenerating(true);
     try {
-      // Busca a última senha gerada para esta fila
-      const { data: lastTicket } = await supabase
-        .from('tickets')
-        .select('ticket_number, created_at')
-        .eq('queue_id', queue.id)
-        .order('created_at', { ascending: false })
-        .limit(1);
+      // Verifica o modo de chamada de senhas
+      // 1 = Modo 2 para 1 (numeração por fila)
+      // 2 = Modo Ordem de Chegada (numeração global)
+      const passwordSetting = companySettings?.password_setting || 1;
 
       let nextNumber = 1;
 
-      // Se existe uma senha anterior e ela foi gerada hoje, continua a sequência
-      // Caso contrário, reseta para 1
-      if (lastTicket && lastTicket.length > 0) {
-        const lastTicketDate = lastTicket[0].created_at;
+      if (passwordSetting === 2) {
+        // MODO ORDEM DE CHEGADA: numeração global sequencial
+        // Busca a última senha gerada de qualquer fila hoje
+        const { data: lastTicket } = await supabase
+          .from('tickets')
+          .select('ticket_number, created_at')
+          .order('created_at', { ascending: false })
+          .limit(1);
 
-        if (isToday(lastTicketDate)) {
-          // Última senha é de hoje, continua a sequência
-          nextNumber = lastTicket[0].ticket_number + 1;
-        } else {
-          // Última senha não é de hoje, reseta para 1
-          nextNumber = 1;
+        if (lastTicket && lastTicket.length > 0) {
+          const lastTicketDate = lastTicket[0].created_at;
+
+          if (isToday(lastTicketDate)) {
+            // Última senha é de hoje, continua a sequência global
+            nextNumber = lastTicket[0].ticket_number + 1;
+          } else {
+            // Última senha não é de hoje, reseta para 1
+            nextNumber = 1;
+          }
+        }
+      } else {
+        // MODO 2 PARA 1: numeração por fila
+        // Busca a última senha gerada para esta fila específica
+        const { data: lastTicket } = await supabase
+          .from('tickets')
+          .select('ticket_number, created_at')
+          .eq('queue_id', queue.id)
+          .order('created_at', { ascending: false })
+          .limit(1);
+
+        if (lastTicket && lastTicket.length > 0) {
+          const lastTicketDate = lastTicket[0].created_at;
+
+          if (isToday(lastTicketDate)) {
+            // Última senha é de hoje, continua a sequência
+            nextNumber = lastTicket[0].ticket_number + 1;
+          } else {
+            // Última senha não é de hoje, reseta para 1
+            nextNumber = 1;
+          }
         }
       }
 

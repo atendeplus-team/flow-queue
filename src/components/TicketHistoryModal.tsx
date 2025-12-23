@@ -42,6 +42,7 @@ interface TicketHistoryEvent {
   doctor_call_count: number;
   cancellation_reason: string | null;
   metadata: Record<string, unknown>;
+  urgent?: number | string | null;
   created_at: string;
 }
 
@@ -316,12 +317,60 @@ const TicketHistoryModal = ({
                   const config = getEventConfig(event.event_type);
                   const { date, time } = formatDateTime(event.created_at);
                   const isLast = index === events.length - 1;
+                  const isUrgentMark = Number(event.urgent) === 1;
+                  const isUrgentRemoved = !isUrgentMark && /retir|remov|retirada|removida|retirado/i.test(event.event_description);
+                  // Mapear tipo de evento para status visual
+                  let statusLabel = '';
+                  let statusColorClass = '';
+                  let statusBgClass = '';
+
+                  if (isUrgentRemoved) {
+                    statusLabel = 'Urgência retirada';
+                    statusColorClass = 'text-gray-700';
+                    statusBgClass = 'bg-gray-50 dark:bg-gray-800';
+                  }
+
+                  if (isUrgentMark) {
+                    statusLabel = 'Urgente';
+                    statusColorClass = 'text-red-700';
+                    statusBgClass = 'bg-red-100 dark:bg-red-900/20';
+                  } else if (event.event_type === 'emitido') {
+                    statusLabel = 'Aguardando';
+                    statusColorClass = 'text-yellow-600';
+                    statusBgClass = 'bg-yellow-50 dark:bg-yellow-900/10';
+                  } else if (
+                    event.event_type === 'chamado_operador' ||
+                    event.event_type === 'repetido_operador' ||
+                    event.event_type === 'chamado_medico' ||
+                    event.event_type === 'repetido_medico'
+                  ) {
+                    statusLabel = 'Chamado';
+                    statusColorClass = 'text-blue-600';
+                    statusBgClass = 'bg-blue-50 dark:bg-blue-900/10';
+                  } else if (
+                    event.event_type === 'atendido_operador' ||
+                    event.event_type === 'finalizado_medico' ||
+                    event.event_type === 'encaminhado'
+                  ) {
+                    statusLabel = 'Atendido';
+                    statusColorClass = 'text-green-600';
+                    statusBgClass = 'bg-green-50 dark:bg-green-900/10';
+                  } else if (
+                    event.event_type === 'cancelado_operador' ||
+                    event.event_type === 'cancelado_medico'
+                  ) {
+                    statusLabel = 'Cancelado';
+                    statusColorClass = 'text-red-600';
+                    statusBgClass = 'bg-red-50 dark:bg-red-900/10';
+                  }
 
                   return (
                     <div key={event.id} className="relative flex gap-4 ml-2">
                       {/* Ícone do evento */}
                       <div
-                        className={`relative z-10 flex h-8 w-8 items-center justify-center rounded-full ${config.bgColor} ${config.color} ring-4 ring-background`}
+                        className={`relative z-10 flex h-8 w-8 items-center justify-center rounded-full ${
+                          statusBgClass || config.bgColor
+                        } ${statusColorClass || config.color} ring-4 ring-background`}
                       >
                         {config.icon}
                       </div>
@@ -329,13 +378,34 @@ const TicketHistoryModal = ({
                       {/* Conteúdo do evento */}
                       <div
                         className={`flex-1 rounded-lg border p-3 ${
-                          isLast ? 'border-primary/50 bg-primary/5' : 'bg-card'
+                          isUrgentMark
+                            ? 'border-red-200 bg-red-50'
+                            : isUrgentRemoved
+                            ? 'border-gray-200 bg-gray-50'
+                            : statusBgClass
+                            ? 'border-transparent ' + statusBgClass
+                            : isLast
+                            ? 'border-primary/50 bg-primary/5'
+                            : 'bg-card'
                         }`}
                       >
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1">
-                            <p className={`font-semibold ${config.color}`}>
+                            <p className={`font-semibold ${
+                              isUrgentMark
+                                ? 'text-red-600'
+                                : isUrgentRemoved
+                                ? statusColorClass || 'text-amber-700'
+                                : statusColorClass || config.color
+                            }`}>
                               {event.event_description}
+                              {statusLabel && (
+                                <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${
+                                  statusColorClass
+                                }`}>
+                                  {statusLabel}
+                                </span>
+                              )}
                             </p>
 
                             {/* Detalhes adicionais */}

@@ -510,6 +510,7 @@ const Display = () => {
         },
         async (payload) => {
           const doctorTicket = payload.new as any;
+          const oldDoctorTicket = payload.old as any;
 
           console.log('🔵 REALTIME - UPDATE doctor_tickets recebido:', {
             id: doctorTicket.id,
@@ -519,6 +520,7 @@ const Display = () => {
             in_service: doctorTicket.in_service,
             finished_at: doctorTicket.finished_at,
             called_at: doctorTicket.called_at,
+            old_called_at: oldDoctorTicket?.called_at,
           });
 
           // Se o médico finalizou o atendimento (finished_at preenchido), limpar o display
@@ -602,13 +604,30 @@ const Display = () => {
               (curr.id === doctorTicket.id ||
                 curr.ticket_id === doctorTicket.ticket_id);
 
+            // Verifica se é uma rechamada (called_at foi atualizado)
+            const isRepeatCall = isSameTicket && 
+                                oldDoctorTicket?.called_at &&
+                                doctorTicket.called_at !== oldDoctorTicket.called_at;
+
+            console.log('🔍 Verificação de rechamada:', {
+              isSameTicket,
+              isRepeatCall,
+              old_called_at: oldDoctorTicket?.called_at,
+              new_called_at: doctorTicket.called_at,
+              current_id: curr?.id,
+              doctor_ticket_id: doctorTicket.id
+            });
+
             setCurrentTicket(ticket);
 
-            // Só faz blink e fala se for uma nova chamada (não apenas atualização de status)
-            if (!isSameTicket) {
+            // Faz blink e fala se for nova chamada OU rechamada
+            if (!isSameTicket || isRepeatCall) {
+              console.log('🔊 Reproduzindo voz:', isRepeatCall ? 'RECHAMADA' : 'NOVA CHAMADA');
               setBlink(true);
               setTimeout(() => setBlink(false), 1000);
               speakTicket(ticket);
+            } else {
+              console.log('❌ Voz NÃO reproduzida - mesmo ticket sem alteração em called_at');
             }
           }
         }

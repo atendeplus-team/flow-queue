@@ -21,6 +21,7 @@ import {
   BarChart3,
   Home,
   Eye,
+  History,
 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -44,6 +45,7 @@ import {
 } from '@/components/ui/dialog';
 import { createQueueSchema, logoUrlSchema } from '@/lib/validations';
 import * as XLSX from 'xlsx';
+import TicketHistoryModal from '@/components/TicketHistoryModal';
 
 interface Stats {
   totalToday: number;
@@ -80,6 +82,7 @@ interface RealtimeTicket {
   served_at: string | null;
   cancelled_at: string | null;
   cancellation_reason: string | null;
+  urgent?: number | string | null;
   wait_time: number; // em minutos
 }
 
@@ -135,6 +138,10 @@ const Admin = () => {
   const [printerIp, setPrinterIp] = useState('');
   const [printerPort, setPrinterPort] = useState<number>(9100);
 
+  // Password call settings
+  const [passwordSetting, setPasswordSetting] = useState<number>(1);
+  const [savingPasswordSetting, setSavingPasswordSetting] = useState(false);
+
   // Real-time tickets
   const [realtimeTickets, setRealtimeTickets] = useState<RealtimeTicket[]>([]);
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -149,6 +156,13 @@ const Admin = () => {
   const [selectedCancellationReason, setSelectedCancellationReason] = useState<{
     display_number: string;
     reason: string;
+  } | null>(null);
+
+  // Modal de histórico da senha
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [selectedTicketForHistory, setSelectedTicketForHistory] = useState<{
+    id: string;
+    display_number: string;
   } | null>(null);
 
   // Verifica sessão inicial
@@ -422,13 +436,13 @@ const Admin = () => {
     navigate('/auth');
   };
 
-  // Carrega configuração de impressora
+  // Carrega configuração de impressora e senhas
   const loadPrinterSettings = async () => {
     try {
       setPrinterLoading(true);
       const { data, error } = await (supabase as any)
         .from('company_settings')
-        .select('id, print_server_url, printer_ip, printer_port')
+        .select('id, print_server_url, printer_ip, printer_port, password_setting')
         .limit(1)
         .single();
       if (error) throw error;
@@ -437,6 +451,7 @@ const Admin = () => {
         if (data.print_server_url) setPrintServerUrl(data.print_server_url);
         if (data.printer_ip) setPrinterIp(data.printer_ip);
         if (data.printer_port) setPrinterPort(Number(data.printer_port));
+        if (data.password_setting) setPasswordSetting(Number(data.password_setting));
       }
     } catch (e) {
       console.error('Erro ao carregar impressora:', e);
@@ -487,6 +502,58 @@ const Admin = () => {
         description: e.message,
         variant: 'destructive',
       });
+    }
+  };
+
+  // Salva configuração de chamada de senhas
+  const savePasswordSetting = async (newSetting: number) => {
+    try {
+      if (!isAdmin) {
+        toast({
+          title: 'Acesso negado',
+          description: 'Apenas administradores podem alterar esta configuração.',
+          variant: 'destructive',
+        });
+        return;
+      }
+      
+      setSavingPasswordSetting(true);
+      const payload = { password_setting: newSetting };
+      
+      let err;
+      if (printerId) {
+        const { error } = await supabase
+          .from('company_settings')
+          .update(payload)
+          .eq('id', printerId);
+        err = error;
+      } else {
+        const { data, error } = await supabase
+          .from('company_settings')
+          .insert(payload)
+          .select('id')
+          .single();
+        err = error;
+        if (!error && data?.id) setPrinterId(data.id);
+      }
+      
+      if (err) throw err;
+      
+      setPasswordSetting(newSetting);
+      toast({
+        title: 'Configuração salva',
+        description: newSetting === 1 
+          ? 'Modo 2 para 1 ativado com sucesso.' 
+          : 'Modo Ordem de Chegada ativado com sucesso.',
+      });
+    } catch (e: any) {
+      toast({
+        title: 'Erro ao salvar',
+        description: e.message,
+        variant: 'destructive',
+      });
+    } finally {
+      setSavingPasswordSetting(false);
     }
   };
 
@@ -965,7 +1032,7 @@ const Admin = () => {
       const { data: tickets, error } = await supabase
         .from('tickets')
         .select(
-          'id, display_number, status, created_at, called_at, served_at, cancelled_at, cancellation_reason'
+          'id, display_number, status, created_at, called_at, served_at, cancelled_at, cancellation_reason, urgent'
         )
         .gte('created_at', today.toISOString())
         .order('created_at', { ascending: false });
@@ -1015,6 +1082,7 @@ const Admin = () => {
             served_at: ticket.served_at,
             cancelled_at: ticket.cancelled_at,
             cancellation_reason: ticket.cancellation_reason,
+            urgent: ticket.urgent,
             wait_time: waitTime,
           };
         }
@@ -1140,8 +1208,47 @@ const Admin = () => {
       return;
     }
 
-    // Preparar dados para o Excel
-    const ticketData = realtimeTickets.map((ticket) => ({
+    // Preparar dados: usar exatamente o que está aparecendo na tela
+    const filteredTickets = realtimeTickets
+      .filter((ticket) =>
+        statusFilter === 'all'
+          ? true
+          : statusFilter === 'urgent'
+          ? Number(ticket.urgent) === 1
+          : ticket.status === statusFilter
+      )
+      .sort((a, b) => {
+        const [field, order] = sortBy.split('_');
+        const direction = order === 'asc' ? 1 : -1;
+
+        if (field === 'display') {
+          return direction * a.display_number.localeCompare(b.display_number);
+        } else if (field === 'status') {
+          return direction * a.status.localeCompare(b.status);
+        } else if (field === 'wait') {
+          return direction * (a.wait_time - b.wait_time);
+        } else if (field === 'created') {
+          const aTime = new Date(a.created_at).getTime();
+          const bTime = new Date(b.created_at).getTime();
+          return direction * (aTime - bTime);
+        } else if (field === 'called') {
+          const aTime = a.called_at ? new Date(a.called_at).getTime() : 0;
+          const bTime = b.called_at ? new Date(b.called_at).getTime() : 0;
+          return direction * (aTime - bTime);
+        } else if (field === 'served') {
+          const aTime = a.served_at ? new Date(a.served_at).getTime() : 0;
+          const bTime = b.served_at ? new Date(b.served_at).getTime() : 0;
+          return direction * (aTime - bTime);
+        } else if (field === 'cancelled') {
+          const aTime = a.cancelled_at ? new Date(a.cancelled_at).getTime() : 0;
+          const bTime = b.cancelled_at ? new Date(b.cancelled_at).getTime() : 0;
+          return direction * (aTime - bTime);
+        }
+        return 0;
+      })
+      .slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
+
+    const ticketData = filteredTickets.map((ticket) => ({
       Código: ticket.display_number,
       Status:
         ticket.status === 'waiting'
@@ -1162,6 +1269,7 @@ const Admin = () => {
         ? new Date(ticket.cancelled_at).toLocaleString('pt-BR')
         : '-',
       'Tempo de Espera (min)': ticket.wait_time,
+      Urgente: Number(ticket.urgent) === 1 ? 'Sim' : 'Não',
     }));
 
     // Criar workbook e worksheet
@@ -1701,6 +1809,7 @@ const Admin = () => {
                       <SelectItem value='called'>Chamado</SelectItem>
                       <SelectItem value='served'>Atendido</SelectItem>
                       <SelectItem value='cancelled'>Cancelado</SelectItem>
+                      <SelectItem value='urgent'>Urgente</SelectItem>
                     </SelectContent>
                   </Select>
                   <Button
@@ -1745,6 +1854,9 @@ const Admin = () => {
                         <th className='text-center py-3 px-4 font-semibold text-foreground'>
                           Motivo
                         </th>
+                        <th className='text-center py-3 px-4 font-semibold text-foreground'>
+                          Histórico
+                        </th>
                         <th className='text-right py-3 px-4 font-semibold text-foreground'>
                           Tempo de Espera
                         </th>
@@ -1752,10 +1864,12 @@ const Admin = () => {
                     </thead>
                     <tbody>
                       {realtimeTickets
-                        .filter(
-                          (ticket) =>
-                            statusFilter === 'all' ||
-                            ticket.status === statusFilter
+                        .filter((ticket) =>
+                          statusFilter === 'all'
+                            ? true
+                            : statusFilter === 'urgent'
+                            ? Number(ticket.urgent) === 1
+                            : ticket.status === statusFilter
                         )
                         .sort((a, b) => {
                           const [field, order] = sortBy.split('_');
@@ -1820,6 +1934,14 @@ const Admin = () => {
                             cancelled: 'Cancelado',
                           };
 
+                          const isUrgent = Number(ticket.urgent) === 1;
+                          const statusClass = isUrgent
+                            ? 'bg-red-100 text-red-600'
+                            : statusColors[ticket.status] || '';
+                          const statusText = isUrgent
+                            ? 'Urgente'
+                            : statusLabels[ticket.status] || ticket.status;
+
                           return (
                             <tr
                               key={ticket.id}
@@ -1828,15 +1950,15 @@ const Admin = () => {
                               <td className='py-3 px-4 font-bold text-foreground text-lg'>
                                 {ticket.display_number}
                               </td>
-                              <td className='py-3 px-4'>
-                                <span
-                                  className={`px-3 py-1 rounded-full text-sm font-semibold ${
-                                    statusColors[ticket.status]
-                                  }`}
-                                >
-                                  {statusLabels[ticket.status]}
-                                </span>
-                              </td>
+                                  <td className='py-3 px-4'>
+                                    <span
+                                      className={`px-3 py-1 rounded-full text-sm font-semibold ${
+                                        statusClass
+                                      }`}
+                                    >
+                                      {statusText}
+                                    </span>
+                                  </td>
                               <td className='py-3 px-4 text-muted-foreground'>
                                 {new Date(ticket.created_at).toLocaleTimeString(
                                   'pt-BR',
@@ -1901,6 +2023,23 @@ const Admin = () => {
                                   </span>
                                 )}
                               </td>
+                              <td className='py-3 px-4 text-center'>
+                                <Button
+                                  variant='ghost'
+                                  size='sm'
+                                  className='h-8 w-8 p-0'
+                                  title='Ver histórico da senha'
+                                  onClick={() => {
+                                    setSelectedTicketForHistory({
+                                      id: ticket.id,
+                                      display_number: ticket.display_number,
+                                    });
+                                    setShowHistoryModal(true);
+                                  }}
+                                >
+                                  <History className='h-4 w-4 text-blue-500' />
+                                </Button>
+                              </td>
                               <td className='py-3 px-4 text-right'>
                                 <span className='font-bold text-primary text-lg'>
                                   {ticket.wait_time} min
@@ -1912,9 +2051,12 @@ const Admin = () => {
                     </tbody>
                   </table>
                   {(() => {
-                    const filteredTickets = realtimeTickets.filter(
-                      (ticket) =>
-                        statusFilter === 'all' || ticket.status === statusFilter
+                    const filteredTickets = realtimeTickets.filter((ticket) =>
+                      statusFilter === 'all'
+                        ? true
+                        : statusFilter === 'urgent'
+                        ? Number(ticket.urgent) === 1
+                        : ticket.status === statusFilter
                     );
 
                     if (filteredTickets.length === 0) {
@@ -2188,6 +2330,126 @@ const Admin = () => {
               </div>
             </Card>
 
+            {/* Configuração de Chamada de Senhas */}
+            <Card className='p-6 shadow-medium'>
+              <h2 className='mb-6 text-2xl font-bold text-foreground'>
+                Configuração de Chamada de Senhas
+              </h2>
+              <p className='text-sm text-muted-foreground mb-6'>
+                Configure como as senhas serão chamadas na fila de atendimento.
+              </p>
+
+              <div className='space-y-6'>
+                {/* Toggle Switch */}
+                <div className='flex flex-col items-center'>
+                  <div 
+                    className='relative w-full max-w-md h-12 md:h-14 bg-muted rounded-full p-1 cursor-pointer transition-all duration-300'
+                    onClick={() => !savingPasswordSetting && savePasswordSetting(passwordSetting === 1 ? 2 : 1)}
+                    role='button'
+                    aria-pressed={passwordSetting === 2}
+                  >
+                    {/* Labels above the slider - each side highlights when active */}
+                    <div className='absolute inset-0 z-20 flex items-center px-2 pointer-events-none'>
+                      <div className='w-1/2 flex items-center justify-center'>
+                        <div className={`relative px-3 py-1 rounded-full transition-all duration-300 transform ${
+                          passwordSetting === 1 ? 'bg-green-50 scale-100' : 'bg-transparent scale-95'
+                        }`}>
+                          <span className={`text-sm font-semibold transition-colors duration-300 ${
+                            passwordSetting === 1 ? 'text-green-700' : 'text-muted-foreground'
+                          }`}>
+                            2 para 1
+                          </span>
+                        </div>
+                      </div>
+                      <div className='w-1/2 flex items-center justify-center'>
+                        <div className={`relative px-3 py-1 rounded-full transition-all duration-300 transform ${
+                          passwordSetting === 2 ? 'bg-green-50 scale-100' : 'bg-transparent scale-95'
+                        }`}>
+                          <span className={`text-sm font-semibold transition-colors duration-300 ${
+                            passwordSetting === 2 ? 'text-green-700' : 'text-muted-foreground'
+                          }`}>
+                            Ordem de Chegada
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Track (subtle) */}
+                    <div
+                      className={`absolute top-1 z-0 h-10 md:h-12 w-[calc(100%-8px)] left-1 rounded-full bg-slate-100 dark:bg-slate-800/40 border border-white/5 transition-colors duration-300`}
+                    />
+
+                    {/* Fill for active side (animated) */}
+                    <div
+                      aria-hidden
+                      className={`absolute top-1 z-[5] h-10 md:h-12 rounded-full transition-all duration-300 ease-in-out bg-gradient-to-r from-green-500 to-green-600 ${
+                        passwordSetting === 1
+                          ? 'left-1 w-[calc(50%-4px)]'
+                          : 'left-[calc(50%+2px)] w-[calc(50%-4px)]'
+                      }`}
+                    />
+
+                    
+                  </div>
+                  
+                  {savingPasswordSetting && (
+                    <p className='text-sm text-primary mt-2 font-medium animate-pulse'>
+                      Salvando...
+                    </p>
+                  )}
+                </div>
+
+                {/* Legendas */}
+                <div className='grid grid-cols-1 md:grid-cols-2 gap-4 mt-6'>
+                  <div 
+                    className={`p-4 rounded-lg border-2 transition-all duration-300 ${
+                      passwordSetting === 1 
+                        ? 'border-primary bg-primary/5' 
+                        : 'border-muted bg-muted/30'
+                    }`}
+                  >
+                    <div className='flex items-center gap-2 mb-2'>
+                      <div className={`w-3 h-3 rounded-full ${passwordSetting === 1 ? 'bg-green-500' : 'bg-muted-foreground/30'}`} />
+                      <h3 className={`font-semibold ${passwordSetting === 1 ? 'text-primary' : 'text-muted-foreground'}`}>
+                        Modo 2 para 1
+                      </h3>
+                    </div>
+                    <p className={`text-sm ${passwordSetting === 1 ? 'text-foreground' : 'text-muted-foreground'}`}>
+                      A cada <strong>2 senhas normais</strong>, será chamada <strong>1 senha preferencial</strong>. 
+                      Este modo garante prioridade para idosos, gestantes e pessoas com deficiência, 
+                      mantendo um fluxo equilibrado no atendimento.
+                    </p>
+                    <p className={`text-xs mt-2 ${passwordSetting === 1 ? 'text-muted-foreground' : 'text-muted-foreground/50'}`}>
+                      Exemplo: N-001, N-002, P-001, N-003, N-004, P-002...
+                    </p>
+                  </div>
+
+                  <div 
+                    className={`p-4 rounded-lg border-2 transition-all duration-300 ${
+                      passwordSetting === 2 
+                        ? 'border-primary bg-primary/5' 
+                        : 'border-muted bg-muted/30'
+                    }`}
+                  >
+                    <div className='flex items-center gap-2 mb-2'>
+                      <div className={`w-3 h-3 rounded-full ${passwordSetting === 2 ? 'bg-green-500' : 'bg-muted-foreground/30'}`} />
+                      <h3 className={`font-semibold ${passwordSetting === 2 ? 'text-primary' : 'text-muted-foreground'}`}>
+                        Modo Ordem de Chegada
+                      </h3>
+                    </div>
+                    <p className={`text-sm ${passwordSetting === 2 ? 'text-foreground' : 'text-muted-foreground'}`}>
+                      As senhas são chamadas <strong>por ordem de chegada</strong>, independente do tipo. 
+                      A numeração é contínua, mantendo apenas o prefixo para diferenciar 
+                      normal, preferencial e oncologia.
+                    </p>
+                    <p className={`text-xs mt-2 ${passwordSetting === 2 ? 'text-muted-foreground' : 'text-muted-foreground/50'}`}>
+                      Exemplo: ATD-01, OC-02, PR-03, ATD-04...
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </Card>
+
             {isSuperAdmin && (
               <Card className='p-6 shadow-medium'>
                 <h2 className='mb-6 text-2xl font-bold text-foreground'>
@@ -2362,6 +2624,19 @@ const Admin = () => {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        {/* Modal de Histórico da Senha */}
+        <TicketHistoryModal
+          open={showHistoryModal}
+          onOpenChange={(open) => {
+            setShowHistoryModal(open);
+            if (!open) {
+              setSelectedTicketForHistory(null);
+            }
+          }}
+          ticketId={selectedTicketForHistory?.id || ''}
+          displayNumber={selectedTicketForHistory?.display_number || ''}
+        />
       </div>
     </div>
   );
