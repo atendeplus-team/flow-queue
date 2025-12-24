@@ -609,16 +609,32 @@ const Display = () => {
                                 oldDoctorTicket?.called_at &&
                                 doctorTicket.called_at !== oldDoctorTicket.called_at;
 
-            console.log('🔍 Verificação de rechamada:', {
+            // Detecta confirmação de chegada: status mudou de 'called' para 'in_service' sem alteração em called_at
+            const isConfirmArrival =
+              oldDoctorTicket?.status === 'called' &&
+              doctorTicket?.status === 'in_service' &&
+              oldDoctorTicket?.called_at === doctorTicket?.called_at;
+
+            console.log('🔍 Verificação de rechamada e confirmação:', {
               isSameTicket,
               isRepeatCall,
+              isConfirmArrival,
               old_called_at: oldDoctorTicket?.called_at,
               new_called_at: doctorTicket.called_at,
+              old_status: oldDoctorTicket?.status,
+              new_status: doctorTicket.status,
               current_id: curr?.id,
               doctor_ticket_id: doctorTicket.id
             });
 
+            // Atualiza o ticket exibido
             setCurrentTicket(ticket);
+
+            // Se for confirmação de chegada, NÃO reproduz voz — apenas atualiza visual/state
+            if (isConfirmArrival) {
+              console.log('ℹ️ Confirmação de chegada detectada — sem áudio');
+              return;
+            }
 
             // Faz blink e fala se for nova chamada OU rechamada
             if (!isSameTicket || isRepeatCall) {

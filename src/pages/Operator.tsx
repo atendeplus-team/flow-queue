@@ -53,6 +53,8 @@ const Operator = () => {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [currentTicket, setCurrentTicket] = useState<Ticket | null>(null);
   const [waitPage, setWaitPage] = useState(0);
+  const [oncologyTickets, setOncologyTickets] = useState<Ticket[]>([]);
+  const [oncologyWaitPage, setOncologyWaitPage] = useState(0);
   const PAGE_SIZE = 7;
   const [operatorName, setOperatorName] = useState('');
   const [counter, setCounter] = useState('');
@@ -311,8 +313,13 @@ const Operator = () => {
               }
               return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
             });
-          setTickets(mapped as any);
+          // Separar tickets OC (Oncologia) dos demais
+          const oncology = mapped.filter((t: any) => /^OC[-\b]/i.test(String(t.display_number || '')));
+          const general = mapped.filter((t: any) => !/^OC[-\b]/i.test(String(t.display_number || '')));
+          setTickets(general as any);
+          setOncologyTickets(oncology as any);
           setWaitPage(0);
+          setOncologyWaitPage(0);
           return;
         } catch (e: any) {
           toast({
@@ -385,6 +392,10 @@ const Operator = () => {
         }
 
         const finalList = [...urgentList, ...nonUrgentList];
+        // Separar fila de Oncologia (display_number prefix OC) e fila geral (restante)
+        const oncology = finalList.filter((t: any) => /^OC[-\b]/i.test(String(t.display_number || '')));
+        const general = finalList.filter((t: any) => !/^OC[-\b]/i.test(String(t.display_number || '')));
+
         // Debug: inspeciona dados recebidos e merge realizado
         // eslint-disable-next-line no-console
         console.log('queue-preview items:', items);
@@ -392,7 +403,13 @@ const Operator = () => {
         console.log('tickets urgentMap:', urgentMap);
         // eslint-disable-next-line no-console
         console.log('tickets finalList after merge:', finalList);
-        setTickets(finalList as any);
+        // eslint-disable-next-line no-console
+        console.log('tickets split general/oncology:', general.length, oncology.length);
+
+        setTickets(general as any);
+        setOncologyTickets(oncology as any);
+        setWaitPage(0);
+        setOncologyWaitPage(0);
         setWaitPage((prev) => {
           const maxPage = Math.max(
             0,
@@ -718,6 +735,12 @@ const Operator = () => {
     let dtFallbackError: any = null;
 
     try {
+      // Extrai ticket_number do display_number para usar na ordenação
+      const ticketNumber = (() => {
+        const m = String(currentTicket.display_number || '').match(/(\d+)/);
+        return m ? parseInt(m[1], 10) : null;
+      })();
+
       if (selectedDoctorId) {
         const res = await (supabase as any).from('doctor_tickets').insert({
           ticket_id: currentTicket.id,
@@ -735,6 +758,7 @@ const Operator = () => {
           finished_at: null,
           called_at: null,
           queue_code: queueData?.code || '',
+          ticket_number: ticketNumber,
         });
         dtError = res.error;
       } else {
@@ -752,6 +776,7 @@ const Operator = () => {
           finished_at: null,
           called_at: null,
           queue_code: queueData?.code || '',
+          ticket_number: ticketNumber,
         });
         dtError = res.error;
       }
@@ -761,6 +786,12 @@ const Operator = () => {
 
     if (dtError) {
       try {
+        // fallback insert: também inclui ticket_number quando possível
+        const ticketNumberFallback = (() => {
+          const m = String(currentTicket.display_number || '').match(/(\d+)/);
+          return m ? parseInt(m[1], 10) : null;
+        })();
+
         const res2 = await (supabase as any).from('doctor_tickets').insert({
           ticket_id: currentTicket.id,
           display_number: currentTicket.display_number,
@@ -774,6 +805,7 @@ const Operator = () => {
           finished_at: null,
           called_at: null,
           queue_code: queueData?.code || '',
+          ticket_number: ticketNumberFallback,
         });
         dtFallbackError = res2.error;
       } catch (err) {
@@ -871,9 +903,9 @@ const Operator = () => {
             </div>
           </div>
 
-          <div className='grid gap-4 lg:grid-cols-3'>
+          <div className='grid gap-4 lg:grid-cols-4'>
             {/* Current Ticket */}
-            <Card className='lg:col-span-2 p-6 shadow-medium'>
+            <Card className='lg:col-span-2 p-8 shadow-medium min-h-[520px]'>
               <h2 className='mb-6 text-2xl font-bold text-foreground'>
                 Senha Atual
               </h2>
@@ -882,7 +914,7 @@ const Operator = () => {
                 <div className='space-y-6'>
                   <div className='rounded-lg bg-gradient-primary p-6 text-center text-white shadow-large'>
                     <p className='mb-2 text-xl font-semibold'>Atendendo</p>
-                    <p className='text-7xl font-bold'>
+                    <p className='text-9xl md:text-8xl sm:text-6xl font-bold leading-none'>
                       {currentTicket.display_number}
                     </p>
                   </div>
@@ -934,7 +966,7 @@ const Operator = () => {
                     size='lg'
                     onClick={callNextTicket}
                     className='bg-gradient-primary'
-                    disabled={tickets.length === 0}
+                    disabled={tickets.length + (oncologyTickets?.length || 0) === 0}
                   >
                     <Phone className='mr-2 h-5 w-5' />
                     Chamar Próxima Senha
@@ -944,8 +976,8 @@ const Operator = () => {
             </Card>
 
             {/* Waiting Queue */}
-            <Card className='p-5 shadow-medium'>
-              <h2 className='mb-4 text-xl font-bold text-foreground'>
+            <Card className='lg:col-span-1 p-4 shadow-medium min-h-[340px]'>
+              <h2 className='mb-4 text-lg font-bold text-foreground'>
                 Fila de Espera
               </h2>
 
@@ -967,17 +999,15 @@ const Operator = () => {
                         className={`flex items-center justify-between rounded-lg p-3 ${ticket.urgent ? 'bg-red-50' : 'bg-muted'}`}
                     >
                       <div className='flex items-center gap-3'>
-                        <span className='flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground'>
+                        <span className='flex h-5 w-5 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground'>
                           {index + 1 + waitPage * PAGE_SIZE}
                         </span>
-                          <span className={`font-semibold ${ticket.urgent ? 'text-red-600' : 'text-foreground'}`}>
+                          <span className={`font-semibold text-sm md:text-base ${ticket.urgent ? 'text-red-600' : 'text-foreground'}`}>
                             {ticket.display_number}
                           </span>
                       </div>
                         <div className='flex items-center gap-2'>
-                          {ticket.priority !== 'normal' && (
-                            <Badge variant='secondary'>Preferencial</Badge>
-                          )}
+                          
                           <Button
                             size='sm'
                             variant={ticket.urgent ? 'destructive' : 'outline'}
@@ -1047,6 +1077,115 @@ const Operator = () => {
                     })
                   }
                   disabled={(waitPage + 1) * PAGE_SIZE >= tickets.length}
+                >
+                  Próximas
+                </Button>
+              </div>
+            </Card>
+
+            {/* Oncology Queue */}
+            <Card className='lg:col-span-1 p-4 shadow-medium min-h-[340px]'>
+              <h2 className='mb-4 text-lg font-bold text-foreground'>
+                Fila de Oncologia
+              </h2>
+
+              <div className='mb-3 text-center'>
+                <p className='text-4xl font-bold text-primary'>
+                  {oncologyTickets.length}
+                </p>
+                <p className='text-sm text-muted-foreground'>
+                  senhas aguardando
+                </p>
+              </div>
+
+              <div className='space-y-2'>
+                {oncologyTickets
+                  .slice(oncologyWaitPage * PAGE_SIZE, (oncologyWaitPage + 1) * PAGE_SIZE)
+                  .map((ticket, index) => (
+                    <div
+                      key={ticket.id}
+                      className={`flex items-center justify-between rounded-lg p-3 ${ticket.urgent ? 'bg-red-50' : 'bg-muted'}`}
+                    >
+                      <div className='flex items-center gap-3'>
+                        <span className='flex h-5 w-5 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground'>
+                          {index + 1 + oncologyWaitPage * PAGE_SIZE}
+                        </span>
+                        <span className={`font-semibold text-sm md:text-base ${ticket.urgent ? 'text-red-600' : 'text-foreground'}`}>
+                          {ticket.display_number}
+                        </span>
+                      </div>
+                      <div className='flex items-center gap-2'>
+
+                        <Button
+                          size='sm'
+                          variant={ticket.urgent ? 'destructive' : 'outline'}
+                          className={`${ticket.urgent ? 'bg-red-600 text-white hover:bg-red-700' : 'hover:bg-red-600 hover:text-white hover:border-red-600'} ${ticket.urgent ? 'text-xs px-2 py-1 h-8' : 'px-3 py-1'}`}
+                          onClick={async () => {
+                            try {
+                              const newUrgent = ticket.urgent ? 0 : 1;
+                              const urgentDate = newUrgent ? new Date().toISOString() : null;
+                              // Atualiza ticket
+                              const { error: updateError } = await (supabase as any)
+                                .from('tickets')
+                                .update({ urgent: newUrgent, urgent_date: urgentDate })
+                                .eq('id', ticket.id);
+                              if (updateError) throw updateError;
+
+                              // Insere no histórico
+                              const { error: histErr } = await (supabase as any)
+                                .from('ticket_history')
+                                .insert({
+                                  ticket_id: ticket.id,
+                                  display_number: ticket.display_number,
+                                  event_type: newUrgent ? 'marcado_urgente' : 'retirado_urgente',
+                                  event_description: newUrgent ? 'Senha marcada como urgente' : 'Urgência retirada da senha',
+                                  urgent: newUrgent,
+                                  urgent_date: urgentDate,
+                                  created_at: new Date().toISOString(),
+                                });
+                              if (histErr) throw histErr;
+
+                              // Atualiza estado local (refetch simples)
+                              loadWaitingTickets();
+                              toast({
+                                title: newUrgent ? 'Senha marcada como urgente' : 'Urgência removida',
+                                description: `Senha ${ticket.display_number}`,
+                              });
+                            } catch (err: any) {
+                              console.error('Erro ao alternar urgente:', err);
+                              toast({ title: 'Erro', description: err.message || String(err), variant: 'destructive' });
+                            }
+                          }}
+                        >
+                          {ticket.urgent ? <span className='text-xs'>Retirar Urgente</span> : 'Urgente'}
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+
+              <div className='mt-3 flex justify-between'>
+                <Button
+                  variant='outline'
+                  size='sm'
+                  onClick={() => setOncologyWaitPage((p) => Math.max(0, p - 1))}
+                  disabled={oncologyWaitPage === 0}
+                >
+                  Anterior
+                </Button>
+                <Button
+                  variant='outline'
+                  size='sm'
+                  onClick={() =>
+                    setOncologyWaitPage((p) => {
+                      const maxPage = Math.max(
+                        0,
+                        Math.floor(Math.max(0, oncologyTickets.length - 1) / PAGE_SIZE)
+                      );
+                      return Math.min(maxPage, p + 1);
+                    })
+                  }
+                  disabled={(oncologyWaitPage + 1) * PAGE_SIZE >= oncologyTickets.length}
                 >
                   Próximas
                 </Button>

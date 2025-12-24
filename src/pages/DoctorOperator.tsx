@@ -467,41 +467,104 @@ const DoctorOperator = () => {
             return;
           }
 
-          // 2) Caso não haja urgente, selecionar pela ordem de chegada (created_at asc)
-          // Ao chamar próxima em Ordem de Chegada, aplicar regra 2-para-1 local: 2 normais, 1 preferencial
-          try {
-            // Busca candidatos (limit maior, pois aplicaremos lógica local)
-            const { data: rows, error: rowsError } = await (supabase as any)
-              .from('doctor_tickets')
-              .select('id, ticket_id, display_number, patient_name, priority, created_at, urgent, urgent_date')
-              .eq('doctor_id', doctorId)
-              .eq('status', 'waiting')
-              .is('in_service', false)
-              .limit(500);
+// 2) Caso não haja urgente, selecionar pela Ordem de Chegada NUMÉRICA (modo 2)
+            // Regra: usar ticket_number quando disponível -> tentar exact next (last+1),
+            // depois menor ticket_number > last, senão fallback por created_at.
+            try {
+              // Busca candidatos (limit maior, pois aplicaremos lógica local)
+              const { data: rows, error: rowsError } = await (supabase as any)
+                .from('doctor_tickets')
+                .select('id, ticket_id, display_number, patient_name, priority, created_at, ticket_number, urgent, urgent_date')
+                .eq('doctor_id', doctorId)
+                .eq('status', 'waiting')
+                .is('in_service', false)
+                .limit(500);
 
-            if (rowsError) throw rowsError;
+              if (rowsError) throw rowsError;
 
-            const items = (rows || []) as any[];
-            // ordenar por created_at asc
-            items.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+              const items = (rows || []) as any[];
+              console.log('[doctor-ui] mode2 candidates count:', items.length, 'doctorId:', doctorId);
+              console.log('[doctor-ui] mode2 candidates sample:', items.slice(0,10));
 
-            const normals = items.filter((c) => (c.priority || 'normal') === 'normal');
-            const preferentials = items.filter((c) => (c.priority || 'normal') !== 'normal');
+              // 1) Obter último NORMAL chamado/finalizado hoje para este médico
+              const startOfDay = new Date();
+              const sod = new Date(Date.UTC(startOfDay.getUTCFullYear(), startOfDay.getUTCMonth(), startOfDay.getUTCDate(), 0, 0, 0)).toISOString();
 
-            const counterKey = `doctor_two_for_one_counter_${doctorId || 'default'}`;
-            let patternCounter = parseInt(localStorage.getItem(counterKey) || '0', 10) || 0;
+              const [{ data: lastByCalled }, { data: lastByFinished }] = await Promise.all([
+                (supabase as any)
+                  .from('doctor_tickets')
+                  .select('display_number, ticket_number, called_at')
+                  .not('called_at', 'is', null)
+                  .eq('priority', 'normal')
+                  .eq('urgent', 0)
+                  .eq('doctor_id', doctorId)
+                  .gte('called_at', sod)
+                  .order('called_at', { ascending: false })
+                  .limit(1),
+                (supabase as any)
+                  .from('doctor_tickets')
+                  .select('display_number, ticket_number, finished_at')
+                  .not('finished_at', 'is', null)
+                  .eq('priority', 'normal')
+                  .eq('urgent', 0)
+                  .eq('doctor_id', doctorId)
+                  .gte('finished_at', sod)
+                  .order('finished_at', { ascending: false })
+                  .limit(1),
+              ]);
 
-            let toCall = null as any;
-            if (preferentials.length > 0) {
-              if (patternCounter < 2 && normals.length > 0) {
-                toCall = normals[0];
-                patternCounter = patternCounter + 1;
-              } else {
-                toCall = preferentials[0];
-                patternCounter = 0;
+              console.log('[doctor-ui] lastByCalled:', lastByCalled, 'lastByFinished:', lastByFinished);
+              const parseNum = (s: string | undefined) => {
+                if (!s) return null;
+                const m = s.match(/(\d+)/);
+                return m ? parseInt(m[1], 10) : null;
+              };
+
+              const calledRow = (lastByCalled && (lastByCalled as any)[0]) || null;
+              const finishedRow = (lastByFinished && (lastByFinished as any)[0]) || null;
+
+              let lastNormalNum = 0;
+              if (calledRow || finishedRow) {
+                const calledAt = calledRow ? new Date(calledRow.called_at).getTime() : 0;
+                const finishedAt = finishedRow ? new Date(finishedRow.finished_at).getTime() : 0;
+                const recent = calledAt >= finishedAt ? calledRow : finishedRow;
+                lastNormalNum = (recent && (recent.ticket_number || parseNum(recent.display_number))) || 0;
               }
-            } else {
-              toCall = items[0];
+
+              // 2) Seleção: exact next, else smallest > lastNormalNum, else earliest created_at
+              const waiting = items;
+              const mapped = waiting.map((t) => ({ ...t, __num: (t.ticket_number || parseNum(t.display_number)) || 0 }));
+
+              let toCall = null as any;
+              const nextNum = lastNormalNum + 1;
+
+              console.log('[doctor-ui] lastNormalNum, nextNum:', lastNormalNum, nextNum);
+
+              if (nextNum && nextNum > 0) {
+                const exact = mapped.find((m) => m.__num === nextNum);
+                console.log('[doctor-ui] exact candidate for nextNum:', exact);
+                if (exact) toCall = exact;
+              }
+
+              if (!toCall && lastNormalNum && lastNormalNum > 0) {
+                const greater = mapped.filter((m) => m.__num > lastNormalNum).sort((a, b) => a.__num - b.__num || new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+                console.log('[doctor-ui] greater candidates:', greater.slice(0,5));
+                if (greater && greater.length) toCall = greater[0];
+              }
+
+              if (!toCall) {
+                const earliest = mapped.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())[0];
+                console.log('[doctor-ui] fallback earliest:', earliest);
+                toCall = earliest || null;
+              }
+
+              console.log('[doctor-ui] selected toCall:', toCall && { id: toCall.id, display_number: toCall.display_number, __num: toCall.__num });
+              if (!toCall || !toCall.id) {
+                toast({
+                  title: 'Nenhuma senha disponível',
+                  description: 'Não há senhas aguardando no momento.',
+                });
+                return;
             }
 
             if (!toCall || !toCall.id) {
@@ -522,9 +585,6 @@ const DoctorOperator = () => {
               .single();
 
             if (callError2) throw callError2;
-
-            // salvar contador
-            localStorage.setItem(counterKey, String(patternCounter));
 
             const newCallCount2 = callCount + 1;
             setCallCount(newCallCount2);
